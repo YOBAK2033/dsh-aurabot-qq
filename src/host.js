@@ -354,7 +354,8 @@ export function apply(ctx) {
     if (!owner) return ''
     if (platformGateway) {
       const r = platformGateway.routeTo(owner)
-      if (r?.chatId) return String(r.chatId)
+      const cid = typeof r === 'string' ? r : r?.chatId
+      if (cid) return String(cid)
     }
     const defAcc = defaultPlatform ? identity.accountOn(owner, defaultPlatform) : ''
     const hasDefInGateway = Boolean(platformGateway && defaultPlatform && platformGateway.caps?.(`${defaultPlatform}:private:0`))
@@ -2273,9 +2274,20 @@ export function apply(ctx) {
   route('/onebot/reconnect', async () => {
     if (!cfg.enabled) return { ok: false, message: await connectionProblem() }
     wrongAccount = ''
-    onebot.restart()
+    if (onebot.state !== 'stopped') {
+      onebot.stop()
+      await new Promise((r) => setTimeout(r, 60))
+    }
+    onebot.start()
     // 等几秒看结果，别只回一句「正在重连」
-    for (let i = 0; i < 16 && !(onebotState === 'connected' && loginOk); i++) await new Promise((r) => setTimeout(r, 500))
+    for (let i = 0; i < 20 && !(onebotState === 'connected' && loginOk); i++) {
+      if (i > 0 && onebotState === 'disconnected' && !wrongAccount) {
+        onebot.stop()
+        await new Promise((r) => setTimeout(r, 60))
+        onebot.start()
+      }
+      await new Promise((r) => setTimeout(r, 500))
+    }
     if (onebotState === 'connected' && loginOk) return { ok: true, message: '连上了' }
     return { ok: false, message: '没连上：' + (await connectionProblem()) }
   })
@@ -2769,6 +2781,7 @@ export function apply(ctx) {
   })
 
   route('/platforms/people', async () => {
+    if (!platformGateway) ensureGateway()
     const mem = use('memory')
     let ids = []
     try { ids = mem?.enumeratePeople?.() || [] } catch (error) { log.debug('枚举人物失败：', error.message) }
@@ -2781,7 +2794,7 @@ export function apply(ctx) {
         name: profile?.name || profile?.alias || '',
         accounts: identity.accountsOf(person) || [],
         owner: identity.isOwner(person),
-        fixed: platformGateway?.fixedPlatform?.(person) || '',
+        fixed: platformGateway?.routing?.fixedPlatform?.(person) || '',
       }
     }).sort((a, b) => Number(b.owner) - Number(a.owner) || String(a.person).localeCompare(String(b.person)))
     return { ok: true, list, owner: identity.owner(), platforms: [...new Set(list.flatMap((x) => x.accounts.map((a) => a.platform)))].sort() }
@@ -2831,8 +2844,9 @@ export function apply(ctx) {
   route('/platforms/people/fixed', async (req) => {
     const b = await readBody(req)
     const person = String(b.person || '').trim()
-    if (!person || !platformGateway?.setFixed) return { ok: false, message: '平台网关还没启动' }
-    platformGateway.setFixed(person, String(b.platform || '').trim())
+    if (!platformGateway) ensureGateway()
+    if (!person || !platformGateway?.routing?.setFixed) return { ok: false, message: '平台网关还没启动' }
+    platformGateway.routing.setFixed(person, String(b.platform || '').trim())
     return { ok: true, message: b.platform ? '已固定平台' : '已取消固定平台' }
   })
   route('/platforms/import/preview', async (req) => {

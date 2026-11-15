@@ -468,65 +468,92 @@ test('合并转发：她能看到转发里的聊天记录', async () => {
 
 test('群聊刹车：主动接话才歇着，群友 @ / 叫名字 / 追问都能叫动（#182）', async () => {
   const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
+  const base = fake.turns.length
+  const groupTurns = () => {
+    const sid = api.hub.sessions()['group:559']?.sessionId
+    return fake.turns.slice(base).filter((t) => t.source?.speaker?.chat === 'group' && (!sid || t.sessionId === sid)).length
+  }
   for (let i = 0; i < 2; i++) {
     const n = sentTo('group', '559').length
+    const turns0 = groupTurns()
     mock.push(grp('559', '710', at('在吗' + i)))
-    await until(() => sentTo('group', '559').length > n)
-    await sleep(600)
+    await until(() => groupTurns() > turns0 && sentTo('group', '559').length > n && !api.hub.stats().busy, 20000)
+    await sleep(200)
   }
-  let turns = fake.turns.length
+  let turns = groupTurns()
+  let rec = api.hub.stats().received
   mock.push(grp('559', '711', text('今天天气不错')))
+  await until(() => api.hub.stats().received > rec, 20000)
   await sleep(1200)
-  assert.equal(fake.turns.length, turns, '说够 2 次了，没叫她的消息先不回')
-  mock.push(grp('559', '711', at('在吗 再来')))
-  await until(() => fake.turns.length > turns)
-  // 等她的回复真的发出去（groupSaid 记上时间），「最近一条是不是她说的」才准
+  assert.equal(groupTurns(), turns, '说够 2 次了，没叫她的消息先不回')
   let sends = sentTo('group', '559').length
-  turns = fake.turns.length
+  mock.push(grp('559', '711', at('在吗 再来')))
+  await until(() => groupTurns() > turns && sentTo('group', '559').length > sends && !api.hub.stats().busy, 20000)
+  // 等她的回复真的发出去（groupSaid 记上时间），「最近一条是不是她说的」才准
+  sends = sentTo('group', '559').length
+  turns = groupTurns()
   mock.push(grp('559', '712', text('肥鱼 你刚才说啥')))
-  await until(() => fake.turns.length > turns, 5000)
-  await until(() => sentTo('group', '559').length > sends, 5000)
-  // 等这一轮的发送彻底安静下来：她要先说完，「最近一条是不是她说的」才稳定
-  let quiet = -1
-  for (let i = 0; i < 20 && quiet !== mock.calls.length; i++) { quiet = mock.calls.length; await sleep(200) }
+  await until(() => groupTurns() > turns && sentTo('group', '559').length > sends && !api.hub.stats().busy, 20000)
   // 刚说完被人追问「人呢」：也算在叫
-  turns = fake.turns.length
+  turns = groupTurns()
   sends = sentTo('group', '559').length
   mock.push(grp('559', '714', text('人呢')))
-  await until(() => fake.turns.length > turns, 5000)
-  await until(() => sentTo('group', '559').length > sends, 5000)
-  await sleep(600)
+  await until(() => groupTurns() > turns && sentTo('group', '559').length > sends && !api.hub.stats().busy, 20000)
   api.hub.leaveTopic('559')
-  turns = fake.turns.length
+  await sleep(20)
+  turns = groupTurns()
+  rec = api.hub.stats().received
   mock.push(grp('559', '713', text('你们先聊')))
+  await until(() => api.hub.stats().received > rec, 20000)
   await sleep(1200)
-  assert.equal(fake.turns.length, turns, '没人叫她的普通消息不回')
+  assert.equal(groupTurns(), turns, '没人叫她的普通消息不回')
+  rec = api.hub.stats().received
   mock.push(grp('559', '714', text('人呢')))
+  await until(() => api.hub.stats().received > rec, 20000)
   await sleep(1200)
-  assert.equal(fake.turns.length, turns, '群友互相追问不抢答')
+  assert.equal(groupTurns(), turns, '群友互相追问不抢答')
   // 主人 @ 照常能叫动
-  turns = fake.turns.length
+  turns = groupTurns()
+  sends = sentTo('group', '559').length
   mock.push(grp('559', OWNER, at('在吗 主人来了'), 'xiaoming'))
-  await until(() => fake.turns.length > turns)
+  await until(() => groupTurns() > turns && sentTo('group', '559').length > sends && !api.hub.stats().busy, 20000)
 })
 
 test('看图：主人发来表情包，她能看到图；表情被收藏并起了备注', async () => {
   const png = fakePng(240, 240, 1)
+  const before = fake.turns.length
+  const sends = sentTo('private', OWNER).length
+  const rev = api.hub.chatLogRevision()
   mock.push(priv(OWNER, [{ type: 'mface', data: { emoji_id: 'x1', summary: '[开心]', file: 'base64://' + png.toString('base64') } }]))
-  await until(() => fake.turns.at(-1)?.images === 1)
-  assert.match(fake.turns.at(-1).reply, /可爱/)
-  await until(() => mock.sent('add_custom_face').length === 1)
-  await until(() => mock.sent('modify_custom_face').length === 1)
+  const turn = await until(() => fake.turns.slice(before).find((t) => {
+    const sid = api.hub.sessions()['private:' + OWNER]?.sessionId
+    return t.source?.speaker?.chat === 'private' && (!sid || t.sessionId === sid) && t.images === 1
+  }), 20000)
+  assert.match(turn.reply, /可爱/)
+  await until(() => mock.sent('add_custom_face').length === 1, 20000)
+  await until(() => mock.sent('modify_custom_face').length === 1, 20000)
   assert.equal(mock.sent('modify_custom_face')[0].params.desc, '可爱的小鲸鱼')
-  const lib = JSON.parse(readFileSync(join(dataDir, 'stickers', 'index.json'), 'utf8'))
+  const lib = await until(() => {
+    try {
+      const data = JSON.parse(readFileSync(join(dataDir, 'stickers', 'index.json'), 'utf8'))
+      return data.items.length === 1 && Array.isArray(data.items[0].tags) && data.items[0].tags.length === 2 ? data : null
+    } catch { return null }
+  }, 20000)
   assert.equal(lib.items.length, 1)
   assert.deepEqual(lib.items[0].tags, ['开心', '卖萌'])
+  await until(() => sentTo('private', OWNER).length >= sends + 2 && api.hub.chatLogRevision() >= rev + 2 && !api.hub.stats().busy, 20000)
 })
 
 test('普通照片不收进表情库', async () => {
   const photo = fakePng(1080, 720, 2)
+  const before = fake.turns.length
+  const sends = sentTo('private', OWNER).length
   mock.push(priv(OWNER, [{ type: 'image', data: { sub_type: 0, file: 'base64://' + photo.toString('base64') } }]))
-  await until(() => fake.turns.at(-1)?.images === 1 && fake.turns.length > 0)
+  await until(() => fake.turns.slice(before).find((t) => {
+    const sid = api.hub.sessions()['private:' + OWNER]?.sessionId
+    return t.source?.speaker?.chat === 'private' && (!sid || t.sessionId === sid) && t.images === 1
+  }), 20000)
+  await until(() => sentTo('private', OWNER).length >= sends + 2 && !api.hub.stats().busy, 20000)
   await sleep(300)
   assert.equal(mock.sent('add_custom_face').length, 1, '数量没变')
 })
@@ -597,8 +624,11 @@ test('语音条不把 QQ 表情/emoji 念出来（face 标签和 emoji 在 TTS �
 })
 
 test('听语音：收到语音先转文字再交给她', async () => {
+  const before = fake.turns.length
+  const sends = sentTo('private', OWNER).length
   mock.push(priv(OWNER, [{ type: 'record', data: { file: 'abc.amr' } }]))
-  await until(() => fake.turns.at(-1)?.userText.includes('[语音] 今天想吃白米饭'))
+  await until(() => fake.turns.slice(before).some((t) => String(t.userText).includes('[语音] 今天想吃白米饭')), 20000)
+  await until(() => sentTo('private', OWNER).length > sends && !api.hub.stats().busy, 20000)
 })
 
 test('群语音：没 @ 也先转写，后面 @ 时上下文能看到（#197）', async () => {
@@ -617,16 +647,22 @@ test('引用消息：私聊能看到被引用的内容；引用她自己时标�
   }
   try {
     let before = fake.turns.length
+    let sends = sentTo('private', OWNER).length
+    let rev = api.hub.chatLogRevision()
     mock.push(priv(OWNER, [{ type: 'reply', data: { id: '7001' } }, ...text('这个你看到了吗')]))
     await until(() => fake.turns.slice(before).some((t) => /上周说的那件事/.test(String(t.userText))), 15000)
     const t1 = fake.turns.slice(before).find((t) => /上周说的那件事/.test(String(t.userText)))
     assert.match(String(t1.userText), /引用 主人\(10000001\) 的消息/)
+    await until(() => sentTo('private', OWNER).length > sends && api.hub.chatLogRevision() >= rev + 2, 15000)
 
     before = fake.turns.length
+    sends = sentTo('private', OWNER).length
+    rev = api.hub.chatLogRevision()
     mock.push(priv(OWNER, [{ type: 'reply', data: { id: '7002' } }, ...text('你还记得吗')]))
     await until(() => fake.turns.slice(before).some((t) => /我说过的晚安/.test(String(t.userText))), 15000)
     const t2 = fake.turns.slice(before).find((t) => /我说过的晚安/.test(String(t.userText)))
     assert.match(String(t2.userText), /引用 你 的消息/, '引用的是她自己，要标成「你」')
+    await until(() => sentTo('private', OWNER).length > sends && api.hub.chatLogRevision() >= rev + 2, 15000)
   } finally {
     delete mock.state.messages
   }
@@ -638,10 +674,13 @@ test('引用消息：群聊里也能看到被引用的内容', async () => {
   }
   try {
     const before = fake.turns.length
+    const sends = sentTo('group', '557').length
+    const rev = api.hub.chatLogRevision()
     mock.push(grp('557', OWNER, [{ type: 'reply', data: { id: '7101' } }, ...text('你看这个')], '主人'))
     await until(() => fake.turns.slice(before).some((t) => /昨晚那把打得好/.test(String(t.userText))), 20000)
     const t = fake.turns.slice(before).find((t) => /昨晚那把打得好/.test(String(t.userText)))
     assert.match(String(t.userText), /引用 小明\(999\) 的消息/, '群提示词里要带引用说明')
+    await until(() => sentTo('group', '557').length > sends && api.hub.chatLogRevision() >= rev + 2, 20000)
   } finally {
     delete mock.state.messages
   }
@@ -654,10 +693,13 @@ test('引用消息：引用里的图片也作为附件给她看', async () => {
   }
   try {
     const before = fake.turns.length
+    const sends = sentTo('private', OWNER).length
+    const rev = api.hub.chatLogRevision()
     mock.push(priv(OWNER, [{ type: 'reply', data: { id: '7201' } }, ...text('这张图呢')]))
-    await until(() => fake.turns.slice(before).some((t) => t.images >= 1), 20000)
-    const t = fake.turns.slice(before).find((x) => x.images >= 1)
+    await until(() => fake.turns.slice(before).some((t) => /这张图呢/.test(String(t.userText)) && t.images >= 1), 20000)
+    const t = fake.turns.slice(before).find((x) => /这张图呢/.test(String(x.userText)) && x.images >= 1)
     assert.ok(t.images >= 1, '引用里的图片要作为附件交给她')
+    await until(() => sentTo('private', OWNER).length >= sends + 2 && api.hub.chatLogRevision() >= rev + 2, 20000)
   } finally {
     delete mock.state.messages
   }
@@ -670,11 +712,14 @@ test('引用消息：引用里的表情包也作为附件给她看', async () =>
   }
   try {
     const before = fake.turns.length
+    const sends = sentTo('private', OWNER).length
+    const rev = api.hub.chatLogRevision()
     mock.push(priv(OWNER, [{ type: 'reply', data: { id: '7401' } }, ...text('这个表情呢')]))
-    await until(() => fake.turns.slice(before).some((t) => t.images >= 1), 20000)
-    const t = fake.turns.slice(before).find((x) => x.images >= 1)
+    await until(() => fake.turns.slice(before).some((t) => /这个表情呢/.test(String(t.userText)) && t.images >= 1), 20000)
+    const t = fake.turns.slice(before).find((x) => /这个表情呢/.test(String(x.userText)) && x.images >= 1)
     assert.ok(t.images >= 1, '引用里的表情包要作为附件交给她')
     assert.match(String(t.userText), /表情包/, '文字里也要注明引用的是表情包')
+    await until(() => sentTo('private', OWNER).length >= sends + 2 && api.hub.chatLogRevision() >= rev + 2, 20000)
   } finally {
     delete mock.state.messages
   }
@@ -690,11 +735,14 @@ test('引用消息：get_msg 只回空 url + 裸文件名时，从消息历史�
   ]
   try {
     const before = fake.turns.length
-    mock.push(priv(OWNER, [{ type: 'reply', data: { id: '7501' } }, ...text('这个表情呢')]))
-    await until(() => fake.turns.slice(before).some((t) => t.images >= 1), 20000)
-    const t = fake.turns.slice(before).find((x) => x.images >= 1)
+    const sends = sentTo('private', OWNER).length
+    const rev = api.hub.chatLogRevision()
+    mock.push(priv(OWNER, [{ type: 'reply', data: { id: '7501' } }, ...text('历史补图这个表情呢')]))
+    await until(() => fake.turns.slice(before).some((t) => /历史补图这个表情呢/.test(String(t.userText)) && t.images >= 1), 20000)
+    const t = fake.turns.slice(before).find((x) => /历史补图这个表情呢/.test(String(x.userText)) && x.images >= 1)
     assert.ok(t.images >= 1, '历史里的图片地址要补上，表情包才算真的看到')
     assert.match(String(t.userText), /引用 你 的消息/, '她自己的表情包标成「你」')
+    await until(() => sentTo('private', OWNER).length >= sends + 2 && api.hub.chatLogRevision() >= rev + 2, 20000)
   } finally {
     delete mock.state.messages
     delete mock.state.history
@@ -1115,8 +1163,14 @@ test('面板保存设置后，已挂载会话的工具清单立即刷新（不�
 test('换头像：主人发来的图也能用，不能被「她的画作」抢走', async () => {
   // 主人先发一张图（和画作不同的字节，能区分是哪张）
   const png = fakePng(300, 300, 11)
+  const before = fake.turns.length
+  const sends = sentTo('private', OWNER).length
   mock.push(priv(OWNER, [{ type: 'image', data: { sub_type: 0, file: 'base64://' + png.toString('base64') } }]))
-  await until(() => fake.turns.at(-1)?.images === 1)
+  await until(() => fake.turns.slice(before).some((t) => {
+    const sid = api.hub.sessions()['private:' + OWNER]?.sessionId
+    return t.source?.speaker?.chat === 'private' && (!sid || t.sessionId === sid) && t.images === 1
+  }), 20000)
+  await until(() => sentTo('private', OWNER).length >= sends + 2 && !api.hub.stats().busy, 20000)
 
   const n = mock.sent('set_qq_avatar').length
   mock.push(priv(OWNER, text('刚才那张换头像测试')))
@@ -1329,7 +1383,7 @@ test('#58 在 DSH 会话窗口里直接打字：这一轮按主人说的算（�
   // 从 QQ 发一条消息，建立新的 QQ 会话
   const n = fake.turns.length
   mock.push(priv(OWNER, text('在吗')))
-  await until(() => fake.turns.length > n)
+  await until(() => fake.turns.length > n && api.hub.sessions()['private:' + OWNER]?.sessionId)
   // 后台任务也会创建会话；用 QQ 映射定位，不能假定最后一个会话就是主人私聊。
   const sid = api.hub.sessions()['private:' + OWNER]?.sessionId
   assert.ok(sid, '新会话建出来了')
@@ -1578,10 +1632,9 @@ test('群聊：同一段里群友发的图也能看到（限 5 分钟、最多 2
   // 三张图先进群：不会触发回复，但应该留在这一段里给她看
   for (let i = 0; i < 3; i++) mock.push(grp('555', String(810 + i), img(21 + i), '发图' + i))
   await sleep(800)
-  let turns = fake.turns.length
+  let before = fake.turns.length
   mock.push(grp('555', '820', text('肥鱼 看看刚才的图')))
-  await until(() => fake.turns.length > turns)
-  const t = fake.turns.at(-1)
+  const t = await until(() => fake.turns.slice(before).find((x) => String(x.userText).includes('肥鱼 看看刚才的图')), 20000)
   assert.equal(t.images, 2, '同一段里的群图最多带 2 张：' + t.userText)
   assert.match(t.userText, /\[图片\]/, '文字里的图片占位还在，但图这次真给她了')
   // 模型看不了图：换成一句明确的提示，不让她照着占位编
@@ -1589,10 +1642,9 @@ test('群聊：同一段里群友发的图也能看到（限 5 分钟、最多 2
   try {
     mock.push(grp('555', '821', img(31), '发图4'))
     await sleep(800)
-    turns = fake.turns.length
+    before = fake.turns.length
     mock.push(grp('555', '822', text('肥鱼 这张是啥')))
-    await until(() => fake.turns.length > turns)
-    const t2 = fake.turns.at(-1)
+    const t2 = await until(() => fake.turns.slice(before).find((x) => String(x.userText).includes('肥鱼 这张是啥')), 20000)
     assert.equal(t2.images, 0, '看不了图的模型不塞图片块')
     assert.match(t2.userText, /对方一共发了 1 张图/)
     assert.match(t2.userText, /看不了图/)

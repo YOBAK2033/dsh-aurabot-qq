@@ -126,7 +126,8 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     const owner = ownerId()
     if (owner && gateway?.routeTo) {
       const route = gateway.routeTo(owner)
-      if (route?.chatId) return String(route.chatId)
+      const cid = typeof route === 'string' ? route : route?.chatId
+      if (cid) return String(cid)
     }
     const defPlat = defaultPlatform()
     const defAcc = owner && defPlat && identity?.accountOn?.(owner, defPlat)
@@ -3130,7 +3131,13 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     if (disposed || wasCleared()) return
     logIncoming(text)
     lastChatAt = now
-    if (msg.kind === 'private' && msgIsOwner) { lastOwnerChatAt = now; lastOwnerChatId = msg.chatId }
+    if (msg.kind === 'private' && msgIsOwner) {
+      lastOwnerChatAt = now
+      lastOwnerChatId = msg.chatId
+      if (!gw) {
+        try { gateway?.noteSeen?.(msg.sender?.person || ownerId(), msg.chatId, now) } catch {}
+      }
+    }
     if (msg.kind === 'private') lastPrivateAt.set(msg.userId, now)
     onActivity?.({ kind: 'in', chatId: msg.chatId, userId: msg.userId, nickname: msg.nickname, text, direct: msg.kind === 'private' || msg.mentioned || mode === 'must', owner: msgIsOwner })
 
@@ -4449,7 +4456,10 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     memoryResetAt,
     filterHistory,
     joinTopic: (gid) => groupEngaged.set(String(gid), Date.now() + ENGAGE_MS),
-    leaveTopic: (gid) => groupEngaged.delete(String(gid)),
+    leaveTopic: (gid) => {
+      groupEngaged.delete(String(gid))
+      groupEngagedRun.delete(String(gid))
+    },
     chatOfSession,
     isOwnedSession,
     canSeeImages: canSeeFor,
