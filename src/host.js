@@ -35,7 +35,7 @@ import { buildFaceIndex } from './chat/faces.js'
 import { FACE_TABLE } from './chat/face-table.js'
 import { dataDir, ensureDir } from './core/store.js'
 import { initUsage, usageReport, closeUsage } from './core/usage.js'
-import { createUpdateChecker, changelogSection, hostEnv, updatePlan, repoOf } from './core/update.js'
+import { createUpdateChecker, changelogSection, hostEnv, updatePlan, updateAttempts, resolveMirror, mirrorLabel, MIRROR_PRESETS, repoOf } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
 import { isOwner, groupResponseMode } from './chat/access.js'
 import { changePermissions, changePrivateWhitelist, privatePermissionCatalog } from './chat/permission-policy.js'
@@ -1953,10 +1953,10 @@ export function apply(ctx) {
     }
   })
   // 更新：检查 GitHub 上有没有新版本；这次更新了什么
-  const checkUpdate = createUpdateChecker({ pkg: PKG, log, unstable: () => getConfig().update.unstable })
+  const checkUpdate = createUpdateChecker({ pkg: PKG, log, unstable: () => getConfig().update.unstable, mirror: () => getConfig().update.mirror })
   // 宿主环境（Windows/macOS/Linux + 桌面版/网页版）决定更新命令怎么写、发布页指向哪
   const updateEnv = hostEnv()
-  const updatePlanOf = (result) => updatePlan({ repo: result.repo || repoOf(PKG), channel: result.channel || 'main', latest: result.latest || '', tag: result.tag || '', env: updateEnv })
+  const updatePlanOf = (result) => updatePlan({ repo: result.repo || repoOf(PKG), channel: result.channel || 'main', latest: result.latest || '', tag: result.tag || '', env: updateEnv, mirror: getConfig().update.mirror })
   route('/update/check', async (req) => {
     const r = await checkUpdate({ force: query(req).force === '1' })
     if (!r || !r.ok) return { ...r, env: updateEnv }
@@ -1972,7 +1972,8 @@ export function apply(ctx) {
     if (!checked || !checked.ok || !checked.tag) return { ok: false, message: checked?.message || '还没有发布过可安装的版本，等作者发 Release 后再试' }
     if (!checked.newer) return { ok: false, message: '当前没有比已安装版本更新的 Release' }
     const channel = checked.channel === 'beta' ? 'beta' : 'main'
-    const plan = updatePlan({ repo, channel, latest: checked.latest, tag: checked.tag, env: updateEnv })
+    const mirror = getConfig().update.mirror
+    const plan = updatePlan({ repo, channel, latest: checked.latest, tag: checked.tag, env: updateEnv, mirror })
     // 本地 link 安装（开发模式）不能被 CLI 覆盖，否则会把链接换成仓库副本
     try {
       const pkgFile = join(process.env.DSH_PROFILE_DIR || '', 'package.json')
@@ -1983,14 +1984,52 @@ export function apply(ctx) {
     } catch (error) {}
     applyingUpdate = true
     try {
-      const arg = `github:${repo}#${checked.tag}`
-      const args = ['plugin', '--profile', updateEnv.profile, 'add', arg]
-      const exec = updateExec(updateEnv, args)
-      const r = await runUpdate(exec.cmd, exec.cmdArgs, exec.env, exec.shell)
-      return { ...r, command: plan.command, env: updateEnv }
+      // 配了镜像先走镜像 tarball；失败自动回退到原来的 github: 直连，默认（没配镜像）只有直连一条。
+      const attempts = updateAttempts({ repo, channel, ref: checked.tag, profile: updateEnv.profile, mirror })
+      const failures = []
+      for (let i = 0; i < attempts.length; i++) {
+        const attempt = attempts[i]
+        const exec = updateExec(updateEnv, attempt.args)
+        const r = await runUpdate(exec.cmd, exec.cmdArgs, exec.env, exec.shell)
+        if (r.ok) {
+          if (i > 0) log.warn('更新镜像失败，已回退直连 GitHub：' + (failures[0]?.message || '未知错误'))
+          const via = attempt.kind === 'mirror' ? `镜像 ${attempt.mirrorLabel}` : '直连 GitHub'
+          const fallback = i > 0 ? '镜像下载失败，已自动回退直连。' : ''
+          return { ...r, command: plan.command, directCommand: plan.directCommand, mirror: plan.mirror, mirrorLabel: plan.mirrorLabel, usedMirror: attempt.kind === 'mirror', env: updateEnv, message: fallback + r.message + `（本次走${via}）` }
+        }
+        failures.push({ kind: attempt.kind, message: r.message, output: r.output })
+        if (i < attempts.length - 1) log.warn(`更新${attempt.kind === 'mirror' ? '镜像' : '直连'}失败，尝试下一条命令：` + (r.message || '未知错误'))
+      }
+      const last = failures[failures.length - 1] || { message: '更新命令没跑成功' }
+      const prefix = failures.length > 1 ? '镜像和直连都没成功：' : ''
+      return {
+        ok: false,
+        message: prefix + last.message,
+        output: failures.map((f) => `[${f.kind === 'mirror' ? '镜像' : '直连'}] ${String(f.output || '').slice(-1200)}`).join('\n'),
+        command: plan.command,
+        directCommand: plan.directCommand,
+        mirror: plan.mirror,
+        mirrorLabel: plan.mirrorLabel,
+        usedMirror: false,
+        env: updateEnv,
+      }
     } finally {
       applyingUpdate = false
     }
+  })
+  // 更新下载镜像：面板设置里读预设；POST 可直接保存（空 = 直连 GitHub）。
+  route('/update/mirror', async (req) => {
+    if (String(req?.method || 'GET').toUpperCase() === 'POST') {
+      const body = await readBody(req)
+      const raw = String(body?.mirror ?? '').trim().slice(0, 300)
+      const resolved = resolveMirror(raw)
+      if (raw && !resolved) return { ok: false, message: '镜像要填 http(s):// 开头的完整前缀，或选 gh-proxy / ghfast 预设' }
+      setConfig(mergeFromPanel(cfg, { update: { mirror: resolved } }))
+      log.info(`更新下载镜像已保存｜${resolved || '（直连 GitHub）'}`)
+      return { ok: true, mirror: resolved, resolved, mirrorLabel: mirrorLabel(resolved), message: resolved ? `已启用下载镜像 ${mirrorLabel(resolved)}` : '已恢复直连 GitHub' }
+    }
+    const current = resolveMirror(getConfig().update.mirror)
+    return { ok: true, mirror: current, resolved: current, mirrorLabel: mirrorLabel(current), presets: MIRROR_PRESETS }
   })
   route('/changelog', async () => {
     let text = ''
