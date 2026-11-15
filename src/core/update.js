@@ -1,7 +1,7 @@
 // 检查更新：读 GitHub 的 Release（不是主分支 package.json）。
 // 只有真正发布过 Release / Tag 的版本才会提示，避免分支上提前写好的版本号被当成更新。
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const STAGE = { alpha: 1, beta: 2, rc: 3 }
@@ -131,6 +131,71 @@ export function updateAttempts({ repo, channel = 'main', ref = '', profile = 'de
     { kind: 'mirror', mirror: prefix, mirrorLabel: mirrorLabel(prefix), url, spec: url, args: ['plugin', '--profile', profile, 'add', url] },
     direct,
   ]
+}
+
+/**
+ * 本地 `link:` 安装保护：读 profile 的 package.json，返回这个插件被 link 的依赖值（不是 link 返回空串）。
+ * profileDir 为空、文件不存在、JSON 坏了都按「没有保护信息」处理，调用方继续正常更新流程。
+ * readFile 可注入，方便单测不依赖真实 DSH profile。
+ */
+export function linkInstallOf({ profileDir = '', packageName = '', readFile = readFileSync } = {}) {
+  if (!profileDir || !packageName) return ''
+  try {
+    const pkg = JSON.parse(readFile(join(profileDir, 'package.json'), 'utf8'))
+    const dep = pkg?.dependencies?.[packageName]
+    return typeof dep === 'string' && dep.startsWith('link:') ? dep : ''
+  } catch (error) {
+    return ''
+  }
+}
+
+/**
+ * 按顺序执行 updateAttempts 的安装尝试，直到一条成功；runAttempt 由宿主注入，
+ * 真实实现会把它转成 dsh plugin add 子进程，单元测试可以直接模拟每条命令的结果。
+ * 返回宿主 /update/apply 需要的 ok / message / output / usedMirror / fallback 字段。
+ */
+export async function runUpdateAttempts({ attempts = [], runAttempt, plan = {}, env = {}, log } = {}) {
+  if (!Array.isArray(attempts) || attempts.length === 0) return { ok: false, message: '没有可执行的更新命令', usedMirror: false, fallback: false, failures: [] }
+  if (typeof runAttempt !== 'function') throw new TypeError('runUpdateAttempts 需要 runAttempt 函数')
+  const failures = []
+  for (let i = 0; i < attempts.length; i++) {
+    const attempt = attempts[i]
+    const r = await runAttempt(attempt, i)
+    if (r && r.ok) {
+      if (i > 0) log?.warn?.('更新镜像失败，已回退直连 GitHub：' + (failures[0]?.message || '未知错误'))
+      const via = attempt.kind === 'mirror' ? `镜像 ${attempt.mirrorLabel}` : '直连 GitHub'
+      const fallback = i > 0 ? '镜像下载失败，已自动回退直连。' : ''
+      return {
+        ...r,
+        ok: true,
+        command: plan.command,
+        directCommand: plan.directCommand,
+        mirror: plan.mirror,
+        mirrorLabel: plan.mirrorLabel,
+        usedMirror: attempt.kind === 'mirror',
+        fallback: i > 0,
+        env,
+        message: fallback + r.message + `（本次走${via}）`,
+      }
+    }
+    failures.push({ kind: attempt.kind, message: r?.message || '更新命令没跑成功', output: r?.output })
+    if (i < attempts.length - 1) log?.warn?.(`更新${attempt.kind === 'mirror' ? '镜像' : '直连'}失败，尝试下一条命令：` + (r?.message || '未知错误'))
+  }
+  const last = failures[failures.length - 1] || { message: '更新命令没跑成功', output: '' }
+  const prefix = failures.length > 1 ? '镜像和直连都没成功：' : ''
+  return {
+    ok: false,
+    message: prefix + last.message,
+    output: failures.map((f) => `[${f.kind === 'mirror' ? '镜像' : '直连'}] ${String(f.output || '').slice(-1200)}`).join('\n'),
+    command: plan.command,
+    directCommand: plan.directCommand,
+    mirror: plan.mirror,
+    mirrorLabel: plan.mirrorLabel,
+    usedMirror: false,
+    fallback: false,
+    env,
+    failures,
+  }
 }
 
 function commandWithSpec(env, profile, spec) {
