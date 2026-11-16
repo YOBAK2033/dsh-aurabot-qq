@@ -57,13 +57,19 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
 
   const owner = () => getConfig().ownerName || '主人'
   const ownerId = () => identity?.owner?.() || null
-  const ownerChat = () => {
+  const ownerRoute = () => {
     if (typeof resolveOwnerRoute === 'function') {
       const r = resolveOwnerRoute({ purpose: 'proactive' })
-      return r && !r.blocked ? String(r.chatId || '') : ''
+      return {
+        chatId: r && !r.blocked ? String(r.chatId || '') : '',
+        blocked: Boolean(r?.blocked),
+        reason: String(r?.reason || (r?.blocked ? 'blocked' : 'no-route')),
+      }
     }
-    return (typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || ''
+    const chatId = String((typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || '')
+    return { chatId, blocked: false, reason: chatId ? 'legacy' : 'no-route' }
   }
+  const ownerChat = () => ownerRoute().chatId
   // 能不能发评论 / 回复：Cookie 里要有 bili_jct，今天也没因为风控之类暂停
   const canPost = (s) => Boolean(parseCookie(cfg().cookie).bili_jct) && s.pauseDay !== dayKey()
   const pauseIf = (s, error) => {
@@ -272,6 +278,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       let commented = 0
       let shared = 0
       let awaiting = 0
+      let ownerBlocked = null
       const groupWanted = [] // 想发到群里的：先攒着问主人，批准了才真发
       const felt = new Map() // bvid → 她自己的一句感受，发截图时配着用
       for (const d of Array.isArray(decisions) ? decisions : []) {
@@ -299,13 +306,17 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         }
         if (c.like && !getConfig().dryRun) api.likeVideo(v.aid).catch(() => {})
         const share = cleanOutboundText(d.share, { warn: (message) => log.warn(`B 站分享：${message}`) }).trim()
-        const shareTo = ownerChat()
-        if (share && !isSilence(share) && c.shareToOwner && shareTo) {
-          // proactive：真发出去才记账（聊天流水 + 她下次在私聊里认得出自己发过什么）；试运行/排队补发不算
-          const r = await hub.sendText(shareTo, `${share}\n${link(v.bvid)}`, undefined, undefined, undefined, { proactive: true, proactiveCause: 'bili' })
-          if (reallySent(r)) {
-            shared++
-            record(s, { kind: 'share', title: v.title, bvid: v.bvid, text: share })
+        if (share && !isSilence(share) && c.shareToOwner) {
+          const shareRoute = ownerRoute()
+          if (!shareRoute.chatId) {
+            if (shareRoute.blocked && !ownerBlocked) ownerBlocked = shareRoute
+          } else {
+            // proactive：真发出去才记账（聊天流水 + 她下次在私聊里认得出自己发过什么）；试运行/排队补发不算
+            const r = await hub.sendText(shareRoute.chatId, `${share}\n${link(v.bvid)}`, undefined, undefined, undefined, { proactive: true, proactiveCause: 'bili' })
+            if (reallySent(r)) {
+              shared++
+              record(s, { kind: 'share', title: v.title, bvid: v.bvid, text: share })
+            }
           }
         }
         if (groupShareOn) {
@@ -318,27 +329,33 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       if (groupWanted.length) {
         const asked = await groupShare.submit(groupWanted)
         if (asked.ok) awaiting = asked.n
+        else if (asked.blocked && !ownerBlocked) ownerBlocked = { blocked: true, reason: asked.reason || 'blocked' }
         log.info(`B 站群分享：${asked.ok ? `${asked.n} 条等主人批准` : `没攒（${asked.why}）`}`)
       }
       // 刷完按概率顺手甩一张截图给主人：默认概率和发一张表情包一样，0 = 从不
       let shotSent = 0
-      const shotTo = ownerChat()
-      if (shotTo && c.enabled && getConfig().enabled && !getConfig().dryRun && Number(c.shotChance) > 0) {
+      if (c.enabled && getConfig().enabled && !getConfig().dryRun && Number(c.shotChance) > 0) {
         const pool = looked.filter((x) => x.shotIds && x.shotIds.length)
         if (pool.length && Math.random() < Number(c.shotChance)) {
-          const x = pool[Math.floor(Math.random() * pool.length)]
-          const file = x.shotIds[Math.floor(Math.random() * x.shotIds.length)]
-          try {
-            const line = felt.get(x.info.bvid) || ''
-            const r = await hub.sendImage(shotTo, shotPath({ file }), undefined, undefined, { proactive: true, proactiveCause: 'bili' })
-            if (reallySent(r)) {
-              shotSent = 1
-              record(s, { kind: 'shot', title: x.info.title, bvid: x.info.bvid, text: line })
-              log.info(`刷完顺手发了张截图《${x.info.title}》`)
-              if (line) await hub.sendText(shotTo, line, undefined, undefined, undefined, { proactive: true, proactiveCause: 'bili' })
+          const shotRoute = ownerRoute()
+          if (!shotRoute.chatId) {
+            if (shotRoute.blocked && !ownerBlocked) ownerBlocked = shotRoute
+          } else {
+            const shotTo = shotRoute.chatId
+            const x = pool[Math.floor(Math.random() * pool.length)]
+            const file = x.shotIds[Math.floor(Math.random() * x.shotIds.length)]
+            try {
+              const line = felt.get(x.info.bvid) || ''
+              const r = await hub.sendImage(shotTo, shotPath({ file }), undefined, undefined, { proactive: true, proactiveCause: 'bili' })
+              if (reallySent(r)) {
+                shotSent = 1
+                record(s, { kind: 'shot', title: x.info.title, bvid: x.info.bvid, text: line })
+                log.info(`刷完顺手发了张截图《${x.info.title}》`)
+                if (line) await hub.sendText(shotTo, line, undefined, undefined, undefined, { proactive: true, proactiveCause: 'bili' })
+              }
+            } catch (error) {
+              log.warn('顺手发截图失败：', error.message)
             }
-          } catch (error) {
-            log.warn('顺手发截图失败：', error.message)
           }
         }
       }
@@ -348,8 +365,20 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         try { await afterBrowse(looked.map(({ info }) => ({ bvid: info.bvid, title: info.title, text: felt.get(info.bvid) || '' }))) }
         catch (error) { log.debug('本轮弹幕未完成：', error.message) }
       }
-      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张${awaiting ? `，群分享待批 ${awaiting} 条` : ''}`)
-      return { ok: true, message: `看了 ${looked.length} 个视频，评论 ${commented} 条，分享给你 ${shared} 个${awaiting ? `，${awaiting} 条等你批准发群` : ''}${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, commented, shared, shots: shotSent, awaitingGroup: awaiting }
+      const delivered = shared > 0 || shotSent > 0 || awaiting > 0
+      const blockedNotice = ownerBlocked && !delivered
+      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张${awaiting ? `，群分享待批 ${awaiting} 条` : ''}${blockedNotice ? `（主人私聊受阻：${ownerBlocked.reason}）` : ''}`)
+      return {
+        ok: true,
+        delivered,
+        ...(blockedNotice ? { skipped: 'owner-blocked', blocked: true, reason: ownerBlocked.reason } : {}),
+        message: `看了 ${looked.length} 个视频，评论 ${commented} 条，分享给你 ${shared} 个${awaiting ? `，${awaiting} 条等你批准发群` : ''}${shotSent ? '，还发了张截图' : ''}${blockedNotice ? `（主账号当前不可用：${ownerBlocked.reason}，未发送给主人）` : ''}`,
+        watched: looked.length,
+        commented,
+        shared,
+        shots: shotSent,
+        awaitingGroup: awaiting,
+      }
     } catch (error) {
       if (isSessionBackoff(error)) return { ok: false, skipped: true, retryAt: error.retryAt, message: error.message }
       log.warn('刷 B 站出错：', error.message)

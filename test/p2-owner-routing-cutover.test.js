@@ -25,6 +25,7 @@ let createBili
 let createGroupShare
 let createModules
 let createOutboundPolicy
+let createSpeakupPolicy
 let contactsMod
 let songMod
 let createFakeDsh
@@ -45,6 +46,7 @@ before(async () => {
   ;({ createGroupShare } = await import('../src/bili/group-share.js'))
   ;({ createModules } = await import('../src/core/modules.js'))
   ;({ createOutboundPolicy } = await import('../src/chat/outbound-policy.js'))
+  ;({ createSpeakupPolicy } = await import('../src/features/proactive-policy.js'))
   ;({ default: contactsMod } = await import('../src/modules/contacts/index.js'))
   ;({ default: songMod } = await import('../src/modules/song/index.js'))
   ;({ createFakeDsh } = await import('./helpers/fake-dsh.js'))
@@ -196,7 +198,58 @@ test('P2-1: Class A 不绕过主账号路由且多实例 primary 经由 outbound
   assert.equal(capturedApi.ownerChat(), 'bridge#2:private:b_two')
   const subOk = await capturedApi.proactive.submit({ itemId: 'i-ok', text: '去 bridge#2' })
   assert.equal(subOk.state, 'sent')
+  assert.equal(policy.statusOf(subOk.deliveryId)?.channel, 'bridge#2', 'outbound policy 的 channel 应保留完整实例名 bridge#2')
   assert.deepEqual(deliveredTargets.map((x) => x.to), ['bridge#2:private:b_two'], '多实例主账号 target 必须被 outbound-policy 识别并投递')
+
+  // 同平台不同实例（bridge#1 vs bridge#2）的 channel / 幂等键相互独立，且均通过 isGovernedTarget 与 proactive-policy 范围判定
+  policyIdentity.setOwner('b_one', 'bridge', 'owner-1')
+  const spPolicy = createSpeakupPolicy({
+    getConfig: () => ({ enabled: true, speakUp: { enabled: true, awakeFrom: 0, awakeTo: 24, idleMinutes: 0, minIntervalMinutes: 5, maxIntervalMinutes: 5, maxPerDay: 5 } }),
+    speakup: { state: () => ({ lastAt: 0, count: 0, day: '2026-11-16' }), reset: () => {} },
+    now: () => new Date(2026, 10, 16, 12, 0, 0).getTime(),
+    dataDir: freshDataDir('aurabot-p2-proact-'),
+    log: { warn() {}, info() {} },
+    identity: policyIdentity,
+    owner: policyIdentity.owner(),
+    defaultPlatform: 'qq',
+  })
+  const b1Res = spPolicy.reserve({ to: 'bridge#1:private:b_one', sourceModule: 'test' })
+  assert.equal(b1Res.ok, true, '多实例 bridge#1:private:b_one 应通过 proactive-policy 范围校验并预占')
+  const subB1 = await policy.submit({ moduleId: 'p2-multi', itemId: 'same-item', to: 'bridge#1:private:b_one', text: '实例1' })
+  const subB2 = await policy.submit({ moduleId: 'p2-multi', itemId: 'same-item', to: 'bridge#2:private:b_two', text: '实例2' })
+  assert.equal(subB1.state, 'sent')
+  assert.equal(subB2.state, 'sent')
+  assert.equal(policy.statusOf(subB1.deliveryId)?.channel, 'bridge#1')
+  assert.equal(policy.statusOf(subB2.deliveryId)?.channel, 'bridge#2')
+
+  // 显式契约边界：非 broker 档（gate / pass）下即使省略 to 也不解析主账号，直接返回 unsupported
+  for (const nonBrokerTier of ['gate', 'pass']) {
+    let resolvedOnNonBroker = 0
+    const tierCfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10001', ext: { outboundPolicy: { tier: nonBrokerTier } } })
+    const tierPolicy = createOutboundPolicy({ identity: policyIdentity, owner: () => policyIdentity.owner() || '', getConfig: () => tierCfg, dataDir: null, hooks: { fsSync: false } })
+    let tierApi = null
+    const tierMods = createModules({
+      ctx: {},
+      core: {
+        identity: policyIdentity,
+        outbound: tierPolicy,
+        resolveOwnerRoute: () => { resolvedOnNonBroker++; return { blocked: true, reason: 'primary-offline', chatId: '' } },
+        hub: { ownerChat: () => 'private:10001', sendText: async () => ({ message_id: 'x' }) },
+        onebot: { call: async () => null },
+        ask: async () => '',
+      },
+      getConfig: () => tierCfg,
+      setConfig: () => {},
+      logger: { child: () => ({ info() {}, warn() {}, debug() {}, error() {} }) },
+      version: 'test',
+      builtins: [{ id: `p2-tier-${nonBrokerTier}`, name: nonBrokerTier, setup(api) { tierApi = api; return {} } }],
+    })
+    await tierMods.boot()
+    const nonBrokerOut = await tierApi.proactive.submit({ itemId: 'i-tier', text: '应返回 unsupported' })
+    assert.deepEqual(nonBrokerOut, { deliveryId: null, state: 'unsupported' })
+    assert.equal(resolvedOnNonBroker, 0, `${nonBrokerTier} 档不承诺省略 to 时解析主账号`)
+    tierMods.dispose()
+  }
 
   // 切到主账号断线 + fallback:false → A 类全阻断且不落入 private:10001
   routeBlocked = true
@@ -204,7 +257,7 @@ test('P2-1: Class A 不绕过主账号路由且多实例 primary 经由 outbound
   const subDropped = await capturedApi.proactive.submit({ itemId: 'i-drop', text: '不应该发出' })
   assert.deepEqual(subDropped, { deliveryId: null, state: 'dropped', reason: 'primary-offline' })
   assert.equal(hubSends.length, 0)
-  assert.equal(deliveredTargets.length, 1)
+  assert.equal(deliveredTargets.length, 3)
 
   // 真实宿主上断掉 bridge#2，验证 bridge.ops.send / /song/request 一律结构化 blocked 且不落回 QQ
   bridgeAdapters.get('bridge#2').disconnect()
@@ -460,6 +513,8 @@ test('P2-3: bili 与 groupShare 按 A/C 类分流且原路回执不受 ownerPrim
   // 可达走 Feishu
   const rOk = await bili.run({ force: true })
   assert.equal(rOk.ok, true)
+  assert.equal(rOk.delivered, true)
+  assert.equal(rOk.blocked, undefined)
   assert.deepEqual(biliSent.map((x) => x.chatId), ['feishu:private:ou_bili'])
 
   // 清除 seen 使同一测试隔离后再测 blocked
@@ -468,6 +523,10 @@ test('P2-3: bili 与 groupShare 按 A/C 类分流且原路回执不受 ownerPrim
   route = { ok: false, blocked: true, reason: 'primary-offline', chatId: '' }
   const rBlocked = await bili.run({ force: true })
   assert.equal(rBlocked.ok, true)
+  assert.equal(rBlocked.delivered, false)
+  assert.equal(rBlocked.skipped, 'owner-blocked')
+  assert.equal(rBlocked.blocked, true)
+  assert.equal(rBlocked.reason, 'primary-offline')
   assert.equal(biliSent.length, 0, 'owner blocked 时 shareToOwner 必须停止发送，不落入 hub.ownerChat')
 
   // groupShare: A 类 submit vs C 类原路回执
@@ -605,4 +664,134 @@ test('P2-4: 安全边界与 C 类既有上下文（resolveConfirmChat / approval
   // 验证 /song/request 走 A 类而被 blocked（即使在同一模块下，工具和面板请求分流）
   assert.equal(typeof coverTool.execute, 'function')
   assert.equal(songSent.length, 0)
+})
+
+test('P2-5: 真实宿主联调（/bili/run HTTP 回执 + contacts 好友事件经 host resolveOwnerRoute 投递与阻塞）', async (t) => {
+  const realFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = realFetch })
+  globalThis.fetch = async (url) => {
+    const s = String(url || '')
+    const json = (obj) => ({ ok: true, status: 200, json: async () => obj })
+    if (s.includes('/x/web-interface/nav')) {
+      return json({
+        code: 0,
+        data: {
+          isLogin: true,
+          uname: 'b',
+          mid: 1,
+          wbi_img: {
+            img_url: 'https://i.example/7cd084941338484aae1ad9425b84077c.png',
+            sub_url: 'https://i.example/4932caff0ff746eab6f01bf08b70ac45.png',
+          },
+        },
+      })
+    }
+    if (s.includes('/x/frontend/finger/spi')) return json({ code: 0, data: { b_3: 'b3' } })
+    if (s.includes('/wbi/search/type')) {
+      return json({
+        code: 0,
+        data: {
+          result: [{ bvid: 'BV1realHost99', aid: 99, title: '真宿主联动测试', author: 'UP', play: 500000, pubdate: Math.floor(Date.now() / 1000), description: 'desc' }],
+        },
+      })
+    }
+    if (s.includes('/web-interface/popular')) {
+      return json({
+        code: 0,
+        data: {
+          list: [{ bvid: 'BV1realHost99', aid: 99, title: '真宿主联动测试', owner: { name: 'UP', mid: 2 }, stat: { view: 500000 }, pubdate: Math.floor(Date.now() / 1000), desc: 'desc' }],
+        },
+      })
+    }
+    if (s.includes('/wbi/view')) {
+      return json({
+        code: 0,
+        data: { bvid: 'BV1realHost99', aid: 99, cid: 1, title: '真宿主联动测试', desc: 'desc', owner: { name: 'UP', mid: 2 }, stat: { view: 500000 }, pages: [{ cid: 1 }] },
+      })
+    }
+    return json({ code: 0, data: { list: [], replies: [], subtitle: { subtitles: [] } } })
+  }
+
+  const seedId = createIdentity({ dataDir: join(process.env.AURABOT_DATA_DIR, 'gateway'), log: { info() {}, warn() {}, debug() {} } })
+  const ownerPerson = seedId.claimOwner('qq', '10001')
+  seedId.link('bridge', 'b_two', ownerPerson, 'manual')
+
+  const initialCfg = normalize({
+    enabled: true,
+    dryRun: false,
+    ownerQQ: '10001',
+    snowluma: { autoStart: false },
+    merge: { enabled: false },
+    allow: { private: [], groups: [] },
+    platforms: { 'bridge#2': { enabled: true } },
+    bili: { enabled: true, cookie: 'SESSDATA=x; bili_jct=y', perRun: 1, minViews: 1000, maxCommentsPerDay: 0, shareToOwner: true },
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'b_two', fallback: false, noticeFallback: true },
+  })
+  writeFileSync(join(process.env.AURABOT_DATA_DIR, 'config.json'), JSON.stringify(initialCfg), 'utf8')
+
+  const fake = createFakeDsh({
+    brain: async ({ text }) => {
+      if (String(text).includes('挑 3 个')) return '["测试"]'
+      if (String(text).includes('看完说说你的想法')) {
+        return JSON.stringify([{ i: 1, feeling: '很不错', comment: '', share: '真宿主联动看到一个好视频', remember: '' }])
+      }
+      return '好的'
+    },
+  })
+  const applied = hostMod.apply(fake.ctx)
+  t.after(async () => {
+    try { await applied.gateway?.stopAll?.() } catch {}
+    try { applied.modules?.dispose?.() } catch {}
+    try { applied.onebot?.disconnect?.() } catch {}
+    try { fake.dispose() } catch {}
+  })
+
+  const bridgeAdapters = new Map()
+  applied.gateway.register(() => {
+    const adapter = makeFakeAdapter({ id: 'bridge', name: 'Bridge' })
+    const origStart = adapter.start
+    adapter.start = async (ctx) => {
+      bridgeAdapters.set(ctx.instance, adapter)
+      return origStart(ctx)
+    }
+    return adapter
+  })
+  await applied.gateway.sync()
+  await applied.ready
+
+  const b2 = bridgeAdapters.get('bridge#2')
+  b2.pushInbound({
+    chat: { kind: 'private', id: 'b_two' },
+    sender: { account: 'b_two', name: '主人2' },
+    parts: [{ type: 'text', text: '激活实例归属' }],
+  })
+
+  // 1) 可达态 HTTP POST /bili/run → 真实走 host -> resolveOwnerRoute -> hub -> gateway -> bridge#2
+  const runOk = (await fake.call('/bili/run', {})).json()
+  assert.equal(runOk.ok, true, JSON.stringify(runOk))
+  assert.equal(runOk.delivered, true)
+  assert.equal(runOk.shared, 1)
+  assert.ok(b2.sent.some((x) => x.message?.chat?.id === 'b_two' && JSON.stringify(x.message.parts).includes('BV1realHost99')), '真宿主 /bili/run 应投递到 bridge#2:b_two')
+
+  // 2) 断线态 HTTP POST /bili/run → 诚实回执 blocked 且不发送消息
+  rmSync(join(process.env.AURABOT_DATA_DIR, 'bili.json'), { force: true })
+  const sentBeforeBlocked = b2.sent.length
+  b2.disconnect()
+  const runBlocked = (await fake.call('/bili/run', {})).json()
+  assert.equal(runBlocked.ok, true)
+  assert.equal(runBlocked.delivered, false)
+  assert.equal(runBlocked.skipped, 'owner-blocked')
+  assert.equal(runBlocked.blocked, true)
+  assert.equal(runBlocked.reason, 'primary-offline')
+  assert.equal(b2.sent.length, sentBeforeBlocked)
+
+  // 3) 真实 host 下 contacts 接收 onebot 好友申请事件：blocked 不发，reconnect 后发往 bridge#2
+  applied.modules.emit('onebot', { post_type: 'request', request_type: 'friend', user_id: 40009, comment: '好友A', flag: 'rh_1' })
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(b2.sent.length, sentBeforeBlocked, '真实 host blocked 时 contacts 不应发任何通知')
+
+  await b2.reconnect()
+  applied.modules.emit('onebot', { post_type: 'request', request_type: 'friend', user_id: 40010, comment: '好友B', flag: 'rh_2' })
+  await new Promise((r) => setTimeout(r, 30))
+  assert.ok(b2.sent.slice(sentBeforeBlocked).some((x) => x.message?.chat?.id === 'b_two' && JSON.stringify(x.message.parts).includes('40010')), '重连后 contacts 好友通知应走真实 host 主账号路由发往 bridge#2:b_two')
 })

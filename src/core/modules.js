@@ -1048,6 +1048,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
           const svc = core.outbound
           if (!svc || typeof svc.submit !== 'function') return { deliveryId: null, state: 'unsupported' }
           const payload = { ...(input || {}), moduleId: id }
+          // proactive.submit 契约仅覆盖 broker 档；pass / gate 档不触发主账号解析，直接交由 outbound.submit 返回 unsupported
           const tier = typeof svc.status === 'function' ? svc.status()?.tier : null
           if (tier && tier !== 'broker') return svc.submit(payload)
           if (!String(payload.to || '').trim()) {

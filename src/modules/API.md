@@ -123,7 +123,7 @@ export default {
 | `api.platformOf(chatId)` | 从 `chatId` 解析所属平台（如 `'qq'`、`'feishu'`），无法识别返回 `''` |
 | `api.caps(chatId)` | 查询该聊天所在平台实例的当前能力表（`Caps`），未就绪返回 `null` |
 | `api.ownerChat()` | 解析主人当前主动消息目标 `chatId`（命中主账号策略；被阻塞或无可用通道返回 `''`，不再静默串发 QQ） |
-| `api.proactive.submit({ text, to?, itemId?, cause? })` | 提交 broker 档主动消息；省略 `to` 时自动解析主人主账号目标，主账号被阻塞或不可达时返回 `{ deliveryId: null, state: 'dropped', reason }` |
+| `api.proactive.submit({ text, to?, itemId?, cause? })` | **仅支持 `broker` 档**：`broker` 档省略 `to` 时自动解析主人主账号目标，主账号受阻或不可达返回 `{ deliveryId: null, state: 'dropped', reason }`；`pass` / `gate` 档不解析主账号并直接返回 `{ deliveryId: null, state: 'unsupported' }`（非 `broker` 档请改用 `api.ownerChat()` + `api.sendParts` / `api.sendText`） |
 | `api.native(platform, action, params?, opts?)` | 调用指定平台的原生动作；**必须在模块 `platforms` 里显式声明该平台**（`['*']` 不放行） |
 | `api.sendSegments(chatId, [OneBot 消息段], 日志备注)` | *(已弃用，仅 QQ 兼容)* 发 OneBot 消息段；未开启 QQ、模块未声明 `'qq'` 或传入非 QQ `chatId` 会直接报错，请改用 `api.sendParts` |
 | `api.onebot(action, params)` | *(已弃用，仅 QQ 兼容)* 调 OneBot API；未开启 QQ 或模块未声明 `'qq'` 会直接报错，请改用 `api.native('qq', ...)` |

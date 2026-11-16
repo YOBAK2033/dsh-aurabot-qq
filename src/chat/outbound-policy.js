@@ -58,25 +58,29 @@ function readOwner(cfg, identity, ownerOpt) {
   return String(raw).trim()
 }
 
-/** 解析私聊目标字符串：支持 private:<acc> 与 <plat>[:inst]:private:<acc>。 */
+/** 解析私聊目标字符串：支持 private:<acc> 与 <plat>[#inst]:private:<acc>；platform 保留完整实例名，basePlatform 剥离 #inst 供 identity 查询。 */
 function parsePrivateTarget(to) {
   const s = String(to ?? '').trim()
   if (!s) return null
   const bare = /^private\s*:\s*(.+)$/i.exec(s)
   if (bare) {
     const id = bare[1].trim()
-    return id ? { platform: 'qq', id } : null
+    return id ? { platform: 'qq', basePlatform: 'qq', id } : null
   }
   const segs = s.split(':')
   if (segs.length === 3 && segs[1].trim().toLowerCase() === 'private') {
-    const plat = segs[0].trim().split('#')[0].trim()
+    const plat = segs[0].trim()
+    const basePlatform = plat.split('#')[0].trim()
     const id = segs[2].trim()
-    return plat && id ? { platform: plat, id } : null
+    return plat && basePlatform && id ? { platform: plat, basePlatform, id } : null
   }
   if (segs.length >= 4 && segs[2].trim().toLowerCase() === 'private') {
-    const plat = segs[0].trim().split('#')[0].trim()
+    const rawPlat = segs[0].trim()
+    const inst = segs[1].trim()
+    const basePlatform = rawPlat.split('#')[0].trim()
     const id = segs.slice(3).join(':').trim()
-    return plat && id ? { platform: plat, id } : null
+    const plat = basePlatform && inst ? `${basePlatform}#${inst}` : rawPlat
+    return plat && basePlatform && id ? { platform: plat, basePlatform, id } : null
   }
   return null
 }
@@ -127,18 +131,19 @@ function isGovernedTarget(to, identity) {
   if (!identity) return false
   const parsed = parsePrivateTarget(to)
   if (!parsed) return false
+  const identityPlat = parsed.basePlatform || parsed.platform
   if (typeof identity.lookup === 'function') {
-    const person = identity.lookup(parsed.platform, parsed.id)
+    const person = identity.lookup(identityPlat, parsed.id)
     if (person) return Boolean(identity.isOwner?.(person))
   }
   const owner = typeof identity.owner === 'function' ? identity.owner() : null
   if (owner) {
     if (typeof identity.accountsOf === 'function') {
       const accs = identity.accountsOf(owner) || []
-      if (accs.some((a) => a && a.platform === parsed.platform && String(a.account) === parsed.id)) return true
+      if (accs.some((a) => a && a.platform === identityPlat && String(a.account) === parsed.id)) return true
     }
     if (typeof identity.accountOn === 'function') {
-      return identity.accountOn(owner, parsed.platform) === parsed.id
+      return identity.accountOn(owner, identityPlat) === parsed.id
     }
   }
   return false

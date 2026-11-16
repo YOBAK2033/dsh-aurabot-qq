@@ -164,25 +164,29 @@ function unlimitedIfZero(value) {
 
 const BUDGET_REGISTRY = new Map()
 
-/** 解析私聊目标字符串：支持 private:<acc> 与 <plat>[:inst]:private:<acc>。 */
+/** 解析私聊目标字符串：支持 private:<acc> 与 <plat>[#inst]:private:<acc>；platform 保留完整实例名，basePlatform 剥离 #inst 供 identity 查询。 */
 function parsePrivateTarget(to) {
   const s = String(to ?? '').trim()
   if (!s) return null
   const bare = /^private\s*:\s*(.+)$/i.exec(s)
   if (bare) {
     const id = bare[1].trim()
-    return id ? { platform: '', id, bare: true } : null
+    return id ? { platform: '', basePlatform: '', id, bare: true } : null
   }
   const segs = s.split(':')
   if (segs.length === 3 && segs[1].trim().toLowerCase() === 'private') {
     const plat = segs[0].trim()
+    const basePlatform = plat.split('#')[0].trim()
     const id = segs[2].trim()
-    return plat && id ? { platform: plat, id, bare: false } : null
+    return plat && basePlatform && id ? { platform: plat, basePlatform, id, bare: false } : null
   }
   if (segs.length >= 4 && segs[2].trim().toLowerCase() === 'private') {
-    const plat = segs[0].trim()
+    const rawPlat = segs[0].trim()
+    const inst = segs[1].trim()
+    const basePlatform = rawPlat.split('#')[0].trim()
     const id = segs.slice(3).join(':').trim()
-    return plat && id ? { platform: plat, id, bare: false } : null
+    const plat = basePlatform && inst ? `${basePlatform}#${inst}` : rawPlat
+    return plat && basePlatform && id ? { platform: plat, basePlatform, id, bare: false } : null
   }
   return null
 }
@@ -196,15 +200,23 @@ function ownerScopeOf(to, identity, { defaultPlatform = '', ownerChat } = {}) {
   const extras = [].concat(extraRaw || []).filter(Boolean).map(String)
   if (extras.includes(target)) return { managed: true }
   if (!identity) return { managed: false, reason: 'out-of-scope' }
-  const platform = parsed.platform || String(defaultPlatform || '').trim()
+  const platform = parsed.basePlatform || parsed.platform || String(defaultPlatform || '').trim()
   if (!platform) return { managed: false, reason: 'out-of-scope' }
   if (typeof identity.lookup === 'function') {
     const person = identity.lookup(platform, parsed.id)
     if (person) return identity.isOwner?.(person) ? { managed: true } : { managed: false, reason: 'out-of-scope' }
   }
   const owner = typeof identity.owner === 'function' ? identity.owner() : null
-  if (owner && typeof identity.accountOn === 'function' && identity.accountOn(owner, platform) === parsed.id) {
-    return { managed: true }
+  if (owner) {
+    if (typeof identity.accountsOf === 'function') {
+      const accs = identity.accountsOf(owner) || []
+      if (accs.some((a) => a && a.platform === platform && String(a.account) === parsed.id)) {
+        return { managed: true }
+      }
+    }
+    if (typeof identity.accountOn === 'function' && identity.accountOn(owner, platform) === parsed.id) {
+      return { managed: true }
+    }
   }
   return { managed: false, reason: 'out-of-scope' }
 }
