@@ -54,7 +54,7 @@ import { setSsrpMode, assertPublicUrl, fetchGuarded } from './core/net.js'
 import { BUILTINS } from './modules/index.js'
 import { createOutboundPolicy } from './chat/outbound-policy.js'
 import { createPurposePolicy, createSpeakupPolicy, createSharedBudget } from './features/proactive-policy.js'
-import { parseChatId } from './gateway/address.js'
+import { parseChatId, formatChatId } from './gateway/address.js'
 import { createIdentity } from './gateway/identity.js'
 import { createGateway } from './gateway/index.js'
 import { createQqAdapter } from './adapters/qq/index.js'
@@ -212,6 +212,11 @@ export function apply(ctx) {
       if (hasAnyPlatform() && !platformGateway) ensureGateway()
       else platformGateway?.sync?.().catch((error) => logger.child('gateway').warn('同步平台网关失败：', error?.message || error))
     }
+    if (JSON.stringify(before.ownerPrimary) !== JSON.stringify(cfg.ownerPrimary)) {
+      lastBlockedRoute = null
+      blockedWarnAt.clear()
+    }
+    syncOwnerFixedCleanup(platformGateway, { allowMigrate: false })
     if (mods && (platformsChanged || JSON.stringify(before.modules) !== JSON.stringify(cfg.modules) || before.safeMode !== cfg.safeMode)) mods.sync().catch(() => {})
     mods?.emit('config', cfg, before)
     if (JSON.stringify(before.backup?.remote) !== JSON.stringify(cfg.backup?.remote)) scheduleRemoteBackup()
@@ -349,20 +354,226 @@ export function apply(ctx) {
   let platformGateway = null
   const platformCandidates = new Map() // 私聊里最近发话的人：首次向导用它认主
   const defaultPlatform = parseChatId('private:0')?.platform || ''
-  function routeOwner() {
+  const platformLabel = (platform) => ({ qq: 'QQ', feishu: '飞书', qqbot: 'QQ 官方机器人', bridge: '通用桥' })[platform] || platform
+  const legacyQqActive = () => Boolean(getConfig()?.enabled)
+  const hasAnyPlatform = () => Object.entries((getConfig()?.platforms) || {}).some(
+    ([k, p]) => p && p.enabled !== false && !(k === defaultPlatform && legacyQqActive()),
+  )
+  let lastBlockedRoute = null // { at, reason, target, purpose }
+  const blockedWarnAt = new Map()
+  const BLOCKED_WARN_THROTTLE_MS = 5 * 60_000
+  function recordBlockedRoute(reason, target, purpose) {
+    const now = Date.now()
+    if (purpose === 'proactive') {
+      lastBlockedRoute = { at: now, reason, target, purpose }
+    }
+    const warnKey = `${reason}:${target?.platform || ''}:${target?.instance || ''}`
+    const prev = blockedWarnAt.get(warnKey) || 0
+    if (now - prev >= BLOCKED_WARN_THROTTLE_MS) {
+      blockedWarnAt.set(warnKey, now)
+      const desc = target ? `${target.platform || ''}/${target.instance || ''}/${target.account || ''}` : '未指定'
+      logger.child('gateway').warn(`主账号路由被阻塞（purpose=${purpose}, reason=${reason}, target=${desc}），已停止发送并禁止跨平台串发`)
+    }
+  }
+  function warnUnobservedSingleAccount(platform, instance, account) {
+    const now = Date.now()
+    const key = `unobserved:${platform}:${instance}:${account}`
+    const prev = blockedWarnAt.get(key) || 0
+    if (now - prev >= BLOCKED_WARN_THROTTLE_MS) {
+      blockedWarnAt.set(key, now)
+      logger.child('gateway').warn(`单实例平台 ${platform}(${instance}) 主账号 ${account} 尚未观测到私聊归属记录，暂按单实例归属放行`)
+    }
+  }
+  /** 一次性将旧 router.fixed[owner] 迁入 ownerPrimary 并幂等清空（仅在已有明确 ownerPrimary 或本次迁移成功后才允许清 fixed，绝不在只读解析中调用）。 */
+  function syncOwnerFixedCleanup(gw = platformGateway, { allowMigrate = false } = {}) {
     const owner = identity.owner()
-    if (!owner) return ''
+    if (!owner || !gw?.routing?.fixedPlatform || !gw?.routing?.setFixed) return
+    const legacyFixed = String(gw.routing.fixedPlatform(owner) || '').trim()
+    if (!legacyFixed) return
+    const cur = getConfig()?.ownerPrimary
+    const hasConfiguredPrimary = Boolean(cur && (cur.mode === 'recent' || cur.platform || cur.instance))
+    if (!hasConfiguredPrimary) {
+      if (!allowMigrate) return
+      try {
+        cfg = saveConfig({
+          ...cfg,
+          ownerPrimary: { ...(cfg.ownerPrimary || {}), mode: 'fixed', platform: legacyFixed },
+        }, cfg)
+      } catch (error) {
+        logger.child('gateway').warn('迁移旧固定平台到 ownerPrimary 失败：', error?.message || error)
+        return
+      }
+    }
+    try { gw.routing.setFixed(owner, '') } catch {}
+  }
+  /**
+   * 纯只读集中式主人出站路由决策（v5 §5.2）：
+   * - 返回 { chatId, blocked, reason, target, fallbackUsed }
+   * - 严禁在本函数内调用 setFixed 或写 router.json
+   */
+  function resolveOwnerRoute({ purpose = 'proactive' } = {}) {
+    const owner = identity.owner()
+    if (!owner) return { chatId: '', blocked: false, reason: 'no-owner', target: null, fallbackUsed: false }
+
+    const pref = getConfig()?.ownerPrimary || {
+      mode: 'fixed', platform: '', instance: '', account: '', fallback: false, noticeFallback: true,
+    }
+    const gwInstances = platformGateway?.instances?.() || []
+    const managedInstances = gwInstances.filter((x) => !(x.instance === defaultPlatform && legacyQqActive()))
+    const hasDefInGateway = Boolean(platformGateway && defaultPlatform && platformGateway.caps?.(`${defaultPlatform}:private:0`))
+    const defAcc = defaultPlatform ? String(identity.accountOn(owner, defaultPlatform) || '') : ''
+    const qqGwInsts = defaultPlatform ? managedInstances.filter((x) => x.platform === defaultPlatform) : []
+    const qqGwEnabled = qqGwInsts.some((x) => x.enabled)
+    // 旧配置未设置 ownerPrimary（mode='fixed' 且 platform/instance 均空）且主人启用了 QQ：
+    // 必须继续优先走 QQ，绝不因 router.seen 里有飞书等其他平台而默认漂移；只有显式 mode='recent' 或未启用 QQ（含仅存在 enabled=false 的 QQ 实例 / 纯非 QQ 主人）才跟随最近私聊。
+    const implicitLegacyQq = pref.mode !== 'recent'
+      && !pref.platform
+      && !pref.instance
+      && Boolean(defAcc && (legacyQqActive() || qqGwEnabled || (hasDefInGateway && qqGwInsts.length === 0)))
+
+    let isFallback = false
+    if (pref.mode !== 'recent' && (pref.platform || pref.instance || implicitLegacyQq)) {
+      let targetInstance = String(pref.instance || '').trim()
+      let targetPlatform = implicitLegacyQq ? defaultPlatform : String(pref.platform || '').trim()
+      let matchedInst = null
+
+      if (targetInstance) {
+        if (targetInstance === defaultPlatform && legacyQqActive()) {
+          targetPlatform = defaultPlatform
+        } else {
+          matchedInst = managedInstances.find((x) => x.instance === targetInstance) || null
+          targetPlatform = matchedInst?.platform || targetPlatform || String(targetInstance).split('#')[0] || ''
+        }
+      } else {
+        if (targetPlatform === defaultPlatform && legacyQqActive() && !hasDefInGateway) {
+          targetInstance = defaultPlatform
+        } else {
+          const same = managedInstances.filter((x) => x.platform === targetPlatform)
+          matchedInst = same.find((x) => x.enabled && x.state === 'connected' && x.caps && x.caps.proactive !== 'none')
+            || same.find((x) => x.enabled && x.state === 'connected')
+            || same[0]
+            || null
+          targetInstance = matchedInst?.instance || targetPlatform
+        }
+      }
+      const samePlat = targetPlatform ? managedInstances.filter((x) => x.platform === targetPlatform) : []
+
+      const ownerAccounts = (identity.accountsOf(owner) || []).filter((a) => a && a.platform === targetPlatform && a.account)
+      let acc = ''
+      let failReason = ''
+      const explicitAccount = implicitLegacyQq ? '' : String(pref.account || '').trim()
+      if (explicitAccount) {
+        const hit = ownerAccounts.find((a) => String(a.account) === explicitAccount)
+        if (!hit) {
+          failReason = 'primary-unlinked'
+          acc = explicitAccount
+        } else {
+          acc = String(hit.account)
+        }
+      } else if (implicitLegacyQq && defAcc) {
+        acc = defAcc
+      } else if (ownerAccounts.length === 1) {
+        acc = String(ownerAccounts[0].account)
+      } else if (ownerAccounts.length > 1) {
+        const matchedByInst = targetInstance
+          ? ownerAccounts.find((a) =>
+              (platformGateway?.routing?.instancesForAccount?.(targetPlatform, a.account) || []).includes(targetInstance)
+            )
+          : null
+        acc = String(matchedByInst?.account || identity.accountOn(owner, targetPlatform) || ownerAccounts[0].account)
+      } else {
+        failReason = 'primary-unlinked'
+      }
+
+      if (!failReason) {
+        if (targetInstance === defaultPlatform && legacyQqActive() && !hasDefInGateway) {
+          if (onebotState === 'connected' && !wrongAccount) {
+            if (purpose === 'proactive') lastBlockedRoute = null
+            return {
+              chatId: `private:${acc}`,
+              blocked: false,
+              reason: 'ok',
+              target: { platform: defaultPlatform, instance: defaultPlatform, account: acc },
+              fallbackUsed: false,
+            }
+          }
+          failReason = 'primary-offline'
+        } else {
+          const st = matchedInst || managedInstances.find((x) => x.instance === targetInstance) || null
+          if (!st || !st.enabled || st.state !== 'connected') {
+            failReason = 'primary-offline'
+          } else {
+            const knownInsts = platformGateway?.routing?.instancesForAccount?.(targetPlatform, acc) || []
+            if (st.self?.account && String(st.self.account) === String(acc)) {
+              failReason = 'primary-unlinked'
+            } else if (knownInsts.length > 0 && !knownInsts.includes(targetInstance)) {
+              failReason = 'primary-unlinked'
+            } else if (samePlat.length > 1 && !knownInsts.includes(targetInstance)) {
+              failReason = 'primary-unlinked'
+            } else if (!st.caps || st.caps.proactive === 'none') {
+              failReason = 'primary-proactive-none'
+            } else {
+              const chatId = formatChatId({ instance: st.instance, platform: st.platform, kind: 'private', id: acc })
+              if (!chatId) {
+                failReason = 'primary-unlinked'
+              } else {
+                if (knownInsts.length === 0) warnUnobservedSingleAccount(st.platform, st.instance, acc)
+                if (purpose === 'proactive') lastBlockedRoute = null
+                return {
+                  chatId,
+                  blocked: false,
+                  reason: 'ok',
+                  target: { platform: st.platform, instance: st.instance, account: acc },
+                  fallbackUsed: false,
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const target = { platform: targetPlatform, instance: targetInstance || targetPlatform, account: acc }
+      const allowFallback = purpose === 'notice' ? (pref.noticeFallback !== false) : (pref.fallback === true)
+      if (!allowFallback) {
+        recordBlockedRoute(failReason, target, purpose)
+        return { chatId: '', blocked: true, reason: failReason, target, fallbackUsed: false }
+      }
+      isFallback = true
+    }
+
     if (platformGateway) {
       const r = platformGateway.routeTo(owner)
       const cid = typeof r === 'string' ? r : r?.chatId
-      if (cid) return String(cid)
+      if (cid) {
+        const chatId = String(cid)
+        const addr = parseChatId(chatId)
+        if (purpose === 'proactive') lastBlockedRoute = null
+        return {
+          chatId,
+          blocked: false,
+          reason: isFallback ? 'fallback-used' : 'ok',
+          target: addr ? { platform: addr.platform, instance: addr.instance || addr.platform, account: addr.id } : null,
+          fallbackUsed: Boolean(isFallback),
+        }
+      }
     }
-    const defAcc = defaultPlatform ? identity.accountOn(owner, defaultPlatform) : ''
-    const hasDefInGateway = Boolean(platformGateway && defaultPlatform && platformGateway.caps?.(`${defaultPlatform}:private:0`))
-    if (defAcc && !hasDefInGateway && onebotState === 'connected') return `private:${defAcc}`
-    return ''
+    if (defAcc && !hasDefInGateway && onebotState === 'connected' && !wrongAccount) {
+      if (purpose === 'proactive') lastBlockedRoute = null
+      return {
+        chatId: `private:${defAcc}`,
+        blocked: false,
+        reason: isFallback ? 'fallback-used' : 'ok',
+        target: { platform: defaultPlatform, instance: defaultPlatform, account: defAcc },
+        fallbackUsed: Boolean(isFallback),
+      }
+    }
+    return { chatId: '', blocked: false, reason: 'no-route', target: null, fallbackUsed: false }
   }
-  function primaryOwnerChatId() {
+  function routeOwner() {
+    return resolveOwnerRoute({ purpose: 'proactive' }).chatId
+  }
+  /** 仅限 /modules/simulate 沙箱推算模拟聊天地址，禁止任何真实出站路径调用。 */
+  function simOwnerChatId() {
     const routed = routeOwner()
     if (routed) return routed
     const owner = identity.owner()
@@ -372,10 +583,6 @@ export function apply(ctx) {
     const first = (identity.accountsOf(owner) || []).find((a) => a?.platform && a?.account)
     return first ? `${first.platform}:private:${first.account}` : ''
   }
-  const legacyQqActive = () => Boolean(getConfig()?.enabled)
-  const hasAnyPlatform = () => Object.entries((getConfig()?.platforms) || {}).some(
-    ([k, p]) => p && p.enabled !== false && !(k === defaultPlatform && legacyQqActive()),
-  )
   /** 需要网关时才建（面板访问、配置里有平台、或中枢要路由时） */
   function ensureGateway() {
     if (platformGateway) return platformGateway
@@ -440,6 +647,7 @@ export function apply(ctx) {
       for (const [factory, id] of [[createQqAdapter, 'qq'], [createFeishuAdapter, 'feishu'], [createQqbotAdapter, 'qqbot'], [createBridgeAdapter, 'bridge']]) {
         try { platformGateway.register(() => factory()) } catch (error) { logger.child('gateway').warn(`注册平台端 ${id} 失败：`, error?.message || error) }
       }
+      syncOwnerFixedCleanup(platformGateway, { allowMigrate: true })
       // 接线要等 hub 建好；这里只登记，由下面的 effect 在 hub 就绪后订阅
       gatewayReady?.(platformGateway)
     } catch (error) {
@@ -597,7 +805,8 @@ export function apply(ctx) {
     gateway: platformGateway,
     identity,
     handover: createHandover({ dsh: ctx, getConfig, identity, log: logger.child('handover') }),
-    platformLabel: (platform) => ({ qq: 'QQ', feishu: '飞书', qqbot: 'QQ 官方机器人', bridge: '通用桥' })[platform] || platform,
+    platformLabel,
+    resolveOwnerRoute,
     routeOwner,
     stickers,
     tts,
@@ -663,7 +872,7 @@ export function apply(ctx) {
     const offMsg = gw.onMessage((m) => {
       if (m && m.kind === 'private' && m.sender?.account) {
         const key = `${m.platform}:${m.sender.account}`
-        platformCandidates.set(key, { platform: m.platform, account: m.sender.account, name: m.sender.name || '', at: Number(m.at) || Date.now() })
+        platformCandidates.set(key, { instance: m.instance || m.platform, platform: m.platform, account: m.sender.account, name: m.sender.name || '', at: Number(m.at) || Date.now() })
         if (platformCandidates.size > 50) platformCandidates.delete(platformCandidates.keys().next().value)
         if (dangerGuard?.handleReply(m.chatId, m.sender?.account, m.text)) return
         if (approvalRelay?.handleReply(m.chatId, m.sender?.account, m.text)) return
@@ -951,7 +1160,8 @@ export function apply(ctx) {
 
   // ---------- 模块 ----------
   const core = {
-    hub, onebot, snowluma, local, groupRoles, mutes, logger, bridge: null, identity, routeOwner,
+    hub, onebot, snowluma, local, groupRoles, mutes, logger, bridge: null, identity, resolveOwnerRoute, routeOwner,
+    proactHealth: () => lastBlockedRoute,
     get gateway() { return platformGateway },
     root: ROOT,
     // 模块经 api.proactive 访问出站治理面（modules.js 里读它）
@@ -1204,10 +1414,14 @@ export function apply(ctx) {
       // 把真正推给会话的内容也记下来：排查「模型为什么说没带编号」时，先看它到底收到了什么
       log.info(`推送提示：${prompt.replace(/\n/g, ' | ').slice(0, 600)}`)
       const ownerId = identity.owner()
-      const cid = primaryOwnerChatId()
-      if (!ownerId || !cid) return false
+      const route = resolveOwnerRoute({ purpose: 'notice' })
+      const cid = route.blocked ? '' : route.chatId
+      if (!ownerId || !cid) {
+        if (route.blocked) log.warn?.(`上报推送已暂停：主账号不可达（${route.reason}）且已关闭通知回退`)
+        return false
+      }
       const addr = parseChatId(cid)
-      const userId = (addr?.platform && identity.accountOn(ownerId, addr.platform)) || addr?.id || String(ownerId)
+      const userId = route.target?.account || (addr?.platform && identity.accountOn(ownerId, addr.platform)) || addr?.id || String(ownerId)
       await hub.pushToSession(
         { chatId: cid, platform: addr?.platform, kind: 'private', userId, nickname: owner },
         [{ type: 'text', text: prompt }],
@@ -2304,10 +2518,24 @@ export function apply(ctx) {
     if (!cfg.enabled) return { ok: false, message: '先打开总开关' }
     if (cfg.dryRun) return { ok: false, message: '现在是试运行，先关掉试运行再测' }
     if (!identity.owner()) return { ok: false, message: '还没配置主人身份' }
-    const to = routeOwner() || primaryOwnerChatId()
-    if (!to) return { ok: false, message: '当前联系不上主人' }
-    const r = await hub.sendText(to, '【Aurabot 自测】大肥鱼到此一游～')
-    return r ? { ok: true, message: '发给主人了，查看一下消息吧' } : { ok: false, message: '没发出去（看日志）' }
+    const route = resolveOwnerRoute({ purpose: 'notice' })
+    if (route.blocked || !route.chatId) {
+      return {
+        ok: false,
+        blocked: Boolean(route.blocked),
+        reason: route.reason,
+        message: route.blocked
+          ? `主账号当前不可用（${route.reason}），且已关闭离线回退`
+          : '当前联系不上主人',
+      }
+    }
+    const r = await hub.sendText(route.chatId, '【Aurabot 自测】大肥鱼到此一游～')
+    const targetDesc = route.target?.platform
+      ? `${platformLabel(route.target.platform)}${route.target.account ? `（${route.target.account}）` : ''}`
+      : route.chatId
+    return r
+      ? { ok: true, target: route.target, fallbackUsed: route.fallbackUsed, message: `已发给主人（${targetDesc}），查看一下消息吧` }
+      : { ok: false, target: route.target, fallbackUsed: route.fallbackUsed, message: '没发出去（看日志）' }
   })
 
   route('/sessions/reset', async () => {
@@ -2769,14 +2997,21 @@ export function apply(ctx) {
     if (identity.owner()) return { ok: false, message: '已经有主人了' }
     let platform = String(b.platform || '').trim()
     let account = String(b.account || '').trim()
+    let candidate = null
     if (!platform || !account) {
       const latest = [...platformCandidates.values()].sort((a, b) => b.at - a.at)[0]
       if (!latest) return { ok: false, message: '先让要当主人的账号给机器人发一条私聊' }
       platform = latest.platform
       account = latest.account
+      candidate = latest
+    } else {
+      candidate = platformCandidates.get(`${platform}:${account}`) || null
     }
     if (!platform || !account) return { ok: false, message: '这个账号还不完整，先让它发一条私聊' }
     const person = identity.claimOwner(platform, account)
+    if (candidate?.instance) {
+      try { platformGateway?.routing?.noteAccountInstance?.(candidate.instance, platform, account, Date.now()) } catch {}
+    }
     return { ...platformView(), ok: true, person, message: '已把这个账号认成主人' }
   })
 
@@ -2889,7 +3124,7 @@ export function apply(ctx) {
   // （模块直接调 api.onebot(...) 的操作不在此列，是真的会执行的）
   const simChat = (b) => {
     const owner = b.as !== 'other'
-    const ownerCid = primaryOwnerChatId()
+    const ownerCid = simOwnerChatId()
     const addr = ownerCid ? parseChatId(ownerCid) : null
     const requested = String(b.platform || '').trim()
     const plat = requested || (owner && addr?.platform ? addr.platform : defaultPlatform)
@@ -3073,7 +3308,8 @@ export function apply(ctx) {
   log.info(`Aurabot v${VERSION} 已加载｜总开关 ${cfg.enabled ? '开' : '关'}｜试运行 ${cfg.dryRun ? '开' : '关'}｜工作区 ${workspaceDirOf(cfg)}`)
 
   return {
-    hub, onebot, snowluma, getConfig, setConfig, logger, modules: mods, bridge, ready: booted,
+    hub, onebot, snowluma, getConfig, setConfig, logger, modules: mods, bridge, resolveOwnerRoute, routeOwner, proactHealth: () => lastBlockedRoute, ready: booted,
+    get gateway() { return platformGateway },
     get stickers() { return use('stickers') },
     get qzone() { return use('diary') },
     get mood() { return use('mood') },

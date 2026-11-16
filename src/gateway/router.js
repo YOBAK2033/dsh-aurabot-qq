@@ -5,7 +5,7 @@
 // 优先级（Gateway.routeTo 注释）：这个人固定的平台 > 最近说过话的平台 > 任一在线的平台；
 //   都没有返回 null。
 // 落盘（网关数据目录 router.json）：
-//   { fixed: { <personId>: 平台名 }, seen: { <personId>: { chatId, at } }, kinds: { <SendKind>: 实例名 } }
+//   { fixed: { <personId>: 平台名 }, seen: { <personId>: { chatId, at } }, kinds: { <SendKind>: 实例名 }, instanceAccounts: { "<platform>:<account>": { <instance>: at } } }
 // 注意：PersonId 不透明，这里只当键用，不解析（CONTRACTS §四.1）。
 // 地址处理只用 address.js 的四个函数。
 
@@ -15,7 +15,7 @@ import { dirname } from 'node:path'
 import { ensureDir } from '../core/store.js'
 
 export function createRouter({ file, log, now = Date.now } = {}) {
-  let data = { fixed: {}, seen: {}, kinds: {} }
+  let data = { fixed: {}, seen: {}, kinds: {}, instanceAccounts: {} }
   let loaded = false
 
   function load() {
@@ -28,10 +28,11 @@ export function createRouter({ file, log, now = Date.now } = {}) {
         fixed: parsed?.fixed && typeof parsed.fixed === 'object' ? parsed.fixed : {},
         seen: parsed?.seen && typeof parsed.seen === 'object' ? parsed.seen : {},
         kinds: parsed?.kinds && typeof parsed.kinds === 'object' ? parsed.kinds : {},
+        instanceAccounts: parsed?.instanceAccounts && typeof parsed.instanceAccounts === 'object' ? { ...parsed.instanceAccounts } : {},
       }
     } catch (error) {
       log?.warn?.('路由数据读不出来，已忽略旧文件：', error?.message || error)
-      data = { fixed: {}, seen: {}, kinds: {} }
+      data = { fixed: {}, seen: {}, kinds: {}, instanceAccounts: {} }
     }
   }
 
@@ -59,14 +60,89 @@ export function createRouter({ file, log, now = Date.now } = {}) {
     return data.fixed[person] || null
   }
 
+  function recordAccountInstance(instance, platform, account, at = now()) {
+    const inst = String(instance || '').trim()
+    const plat = String(platform || '').trim()
+    const acc = String(account || '').trim()
+    if (!inst || !plat || !acc) return false
+    const key = `${plat}:${acc}`
+    if (!data.instanceAccounts || typeof data.instanceAccounts !== 'object') data.instanceAccounts = {}
+    if (!data.instanceAccounts[key] || typeof data.instanceAccounts[key] !== 'object') {
+      data.instanceAccounts[key] = {}
+    }
+    data.instanceAccounts[key][inst] = Number(at) || now()
+    return true
+  }
+
+  /** 记录某账号实际出现在哪个平台实例（用于同平台多实例的账号归属校验） */
+  function noteAccountInstance(instance, platform, account, at = now()) {
+    load()
+    if (recordAccountInstance(instance, platform, account, at)) save()
+  }
+
+  function instancesForAccount(platform, account) {
+    load()
+    const plat = String(platform || '').trim()
+    const acc = String(account || '').trim()
+    if (!plat || !acc) return []
+    const merged = new Map()
+    const map = data.instanceAccounts?.[`${plat}:${acc}`]
+    if (map && typeof map === 'object') {
+      for (const [inst, ts] of Object.entries(map)) {
+        if (inst) merged.set(inst, Number(ts) || 0)
+      }
+    }
+    for (const s of Object.values(data.seen || {})) {
+      const addr = s?.chatId ? parseChatId(s.chatId) : null
+      if (!addr || addr.kind !== 'private' || addr.platform !== plat || String(addr.id) !== acc) continue
+      const prev = merged.get(addr.instance)
+      const ts = Number(s.at) || 0
+      if (prev === undefined || ts > prev) merged.set(addr.instance, ts)
+    }
+    return [...merged.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([inst]) => inst)
+  }
+
+  function accountsForInstance(instance, platform) {
+    load()
+    const inst = String(instance || '').trim()
+    const plat = String(platform || '').trim()
+    if (!inst) return []
+    const prefix = plat ? `${plat}:` : ''
+    const merged = new Map()
+    for (const [key, map] of Object.entries(data.instanceAccounts || {})) {
+      if (prefix && !key.startsWith(prefix)) continue
+      if (map && typeof map === 'object' && Object.prototype.hasOwnProperty.call(map, inst)) {
+        const idx = key.indexOf(':')
+        const acc = idx >= 0 ? key.slice(idx + 1) : key
+        if (acc) merged.set(acc, Number(map[inst]) || 0)
+      }
+    }
+    for (const s of Object.values(data.seen || {})) {
+      const addr = s?.chatId ? parseChatId(s.chatId) : null
+      if (!addr || addr.kind !== 'private' || addr.instance !== inst) continue
+      if (plat && addr.platform !== plat) continue
+      const acc = String(addr.id || '')
+      if (!acc) continue
+      const prev = merged.get(acc)
+      const ts = Number(s.at) || 0
+      if (prev === undefined || ts > prev) merged.set(acc, ts)
+    }
+    return [...merged.entries()].sort((a, b) => b[1] - a[1]).map(([acc]) => acc)
+  }
+
   /** 中枢每收到一条私聊消息调一次：记「最近在哪个实例说过话 + 时间」 */
   function noteSeen(person, chatId, at = now()) {
+    const p = String(person || '').trim()
+    if (!p) return
     const norm = normalizeChatId(chatId)
     if (!norm) return // system:* / 认不出的不记
     const addr = parseChatId(norm)
-    if (!addr) return
+    if (!addr || addr.kind !== 'private') return
     load()
-    data.seen[person] = { chatId: norm, at: Number(at) || now() }
+    data.seen[p] = { chatId: norm, at: Number(at) || now() }
+    recordAccountInstance(addr.instance, addr.platform, addr.id, at)
     save()
   }
   function lastSeen(person) {
@@ -97,18 +173,35 @@ export function createRouter({ file, log, now = Date.now } = {}) {
     const statuses = typeof getInstances === 'function' ? getInstances() : []
     // 只考虑在线、启用、允许主动消息的实例
     const usable = (st) => Boolean(st) && st.enabled && st.state === 'connected' && st.caps && st.caps.proactive !== 'none'
-    const addressOn = (st, fallback) => {
-      const account = identity.accountOn(person, st.platform)
+    const addressOn = (st) => {
+      const multiPlat = statuses.filter((s) => s.platform === st.platform).length > 1
+      let account = ''
+      if (typeof identity.accountsOf === 'function') {
+        const list = (identity.accountsOf(person) || []).filter((a) => a && a.platform === st.platform && a.account)
+        if (list.length > 1) {
+          const matched = list.find((a) => instancesForAccount(st.platform, a.account).includes(st.instance))
+          if (matched) account = String(matched.account)
+          else if (multiPlat) return null
+          else account = String(identity.accountOn(person, st.platform) || list[0].account || '')
+        }
+      }
+      if (!account) account = identity.accountOn(person, st.platform)
       if (!account) return null
+      if (multiPlat) {
+        const known = instancesForAccount(st.platform, account)
+        if (known.length > 0 && !known.includes(st.instance)) return null
+      }
       return formatChatId({ instance: st.instance, platform: st.platform, kind: 'private', id: account })
     }
 
     // 1. 这个人固定的平台
     const fixed = fixedPlatform(person)
     if (fixed) {
-      const st = statuses.find((s) => s.platform === fixed && usable(s))
-      const chatId = st ? addressOn(st) : null
-      if (chatId) return chatId
+      for (const st of statuses) {
+        if (st.platform !== fixed || !usable(st)) continue
+        const chatId = addressOn(st)
+        if (chatId) return chatId
+      }
     }
 
     // 2. 最近说过话的实例（优先实例里她有账号才用）
@@ -118,8 +211,8 @@ export function createRouter({ file, log, now = Date.now } = {}) {
       if (addr) {
         const st = statuses.find((s) => s.instance === addr.instance && usable(s))
         if (st) {
-          const account = identity.accountOn(person, st.platform)
-          if (account) return formatChatId({ instance: st.instance, platform: st.platform, kind: 'private', id: account })
+          const chatId = addressOn(st)
+          if (chatId) return chatId
         }
       }
     }
@@ -133,5 +226,16 @@ export function createRouter({ file, log, now = Date.now } = {}) {
     return null
   }
 
-  return { setFixed, fixedPlatform, noteSeen, lastSeen, setKindInstance, instanceForKind, routeTo }
+  return {
+    setFixed,
+    fixedPlatform,
+    noteSeen,
+    lastSeen,
+    setKindInstance,
+    instanceForKind,
+    noteAccountInstance,
+    instancesForAccount,
+    accountsForInstance,
+    routeTo,
+  }
 }

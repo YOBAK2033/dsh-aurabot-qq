@@ -152,6 +152,9 @@ export function createGateway({ config, dataDir, http, identity, log, now = Date
       logger.warn(`实例 ${run.instance} 推来的消息拼不出地址（chat=${JSON.stringify(message.chat)}），已丢弃`)
       return
     }
+    if (message.chat?.kind === 'private' && message.sender?.account) {
+      router.noteAccountInstance(run.instance, run.platform, message.sender.account, message.at)
+    }
     const person = identity.resolve(run.platform, message.sender.account, message.sender.alt ? { alt: message.sender.alt } : undefined)
     const { text, wakeText } = renderParts(message.parts)
     const mentionsOthers = (Array.isArray(message.parts) ? message.parts : []).some((p) => p?.type === 'mention' && p.account !== 'all')
@@ -741,6 +744,9 @@ export function createGateway({ config, dataDir, http, identity, log, now = Date
       setFixed: (person, platform) => router.setFixed(person, platform),
       fixedPlatform: (person) => router.fixedPlatform(person),
       noteSeen: (person, chatId, at) => router.noteSeen(person, chatId, at),
+      noteAccountInstance: (instance, platform, account, at) => router.noteAccountInstance(instance, platform, account, at),
+      instancesForAccount: (platform, account) => router.instancesForAccount(platform, account),
+      accountsForInstance: (instance, platform) => router.accountsForInstance(instance, platform),
       setKindInstance: (kind, instance) => router.setKindInstance(kind, instance),
       instanceForKind: (kind) => router.instanceForKind(kind),
     },

@@ -1,0 +1,664 @@
+// P1 · 单一主账号配置 + 纯只读集中式 resolveOwnerRoute + 防穿透 + 清除一致性验收测试
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { normalize, mergeFromPanel, pickPlatformNeutralConfig, publicConfig } from '../src/core/config.js'
+import { createHub } from '../src/chat/hub.js'
+import { createIdentity } from '../src/gateway/identity.js'
+import { createRouter } from '../src/gateway/router.js'
+import { createFakeDsh } from './helpers/fake-dsh.js'
+import { startMockOneBot } from './helpers/mock-onebot.js'
+
+const noopLog = { debug() {}, info() {}, warn() {}, error() {} }
+
+function makeSandbox(t, prefix = 'aurabot-p1-') {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  const prevData = process.env.AURABOT_DATA_DIR
+  const prevWs = process.env.AURABOT_WORKSPACE
+  process.env.AURABOT_DATA_DIR = dir
+  process.env.AURABOT_WORKSPACE = join(dir, 'workspace')
+  mkdirSync(join(dir, 'workspace'), { recursive: true })
+  t.after(() => {
+    if (prevData === undefined) delete process.env.AURABOT_DATA_DIR
+    else process.env.AURABOT_DATA_DIR = prevData
+    if (prevWs === undefined) delete process.env.AURABOT_WORKSPACE
+    else process.env.AURABOT_WORKSPACE = prevWs
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  })
+  return dir
+}
+
+async function callBridgeHello(fake, instance, token, caps) {
+  const helloRoute = fake.routes.get(`/platform/${instance}/hello`)
+  assert.ok(helloRoute, `应已注册 ${instance} /hello 路由`)
+  let out = ''
+  let status = 200
+  await helloRoute.handler(
+    {
+      method: 'POST',
+      headers: { 'x-bridge-token': token },
+      rawBody: Buffer.from('{}'),
+      body: { caps },
+    },
+    {
+      set statusCode(v) { status = v },
+      get statusCode() { return status },
+      setHeader() {},
+      end(s) { out = s },
+    },
+  )
+  assert.equal(status, 200, out)
+}
+
+async function waitUntil(fn, ms = 3000) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (await fn()) return true
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  return false
+}
+
+test('P1-1：config.js ownerPrimary 默认值、normalize、mergeFromPanel 清空联动与中性字段迁移', () => {
+  const def = normalize({})
+  assert.deepEqual(def.ownerPrimary, {
+    mode: 'fixed',
+    platform: '',
+    instance: '',
+    account: '',
+    fallback: false,
+    noticeFallback: true,
+  })
+
+  // 非法值归一化与 publicConfig 保留
+  const bad = normalize({
+    ownerPrimary: { mode: 'invalid', platform: ' feishu ', instance: ' feishu#2 ', account: ' ou_1 ', fallback: 'yes', noticeFallback: undefined },
+  })
+  assert.deepEqual(bad.ownerPrimary, {
+    mode: 'fixed',
+    platform: 'feishu',
+    instance: 'feishu#2',
+    account: 'ou_1',
+    fallback: false,
+    noticeFallback: true,
+  })
+  assert.deepEqual(publicConfig(bad).ownerPrimary, bad.ownerPrimary)
+
+  // recent 模式下强清三元组；切换 platform 清旧 instance/account；切换 instance 清旧 account；单传 account:'' 清空 account
+  const step1 = mergeFromPanel(def, {
+    ownerPrimary: { mode: 'fixed', platform: 'feishu', instance: 'feishu#2', account: 'ou_2', fallback: true, noticeFallback: false },
+  })
+  assert.deepEqual(step1.ownerPrimary, {
+    mode: 'fixed',
+    platform: 'feishu',
+    instance: 'feishu#2',
+    account: 'ou_2',
+    fallback: true,
+    noticeFallback: false,
+  })
+
+  // 仅保存无关字段：保留 ownerPrimary 原样
+  const stepUnrelated = mergeFromPanel(step1, { ownerName: '大主人' })
+  assert.deepEqual(stepUnrelated.ownerPrimary, step1.ownerPrimary)
+
+  // 保持 platform/instance 不变，仅显式传 account: '' → 清空 account
+  const stepClearAcc = mergeFromPanel(step1, {
+    ownerPrimary: { mode: 'fixed', platform: 'feishu', instance: 'feishu#2', account: '' },
+  })
+  assert.equal(stepClearAcc.ownerPrimary.platform, 'feishu')
+  assert.equal(stepClearAcc.ownerPrimary.instance, 'feishu#2')
+  assert.equal(stepClearAcc.ownerPrimary.account, '')
+
+  // 同 platform 仅切换 instance → 清空旧 account
+  const stepSwitchInst = mergeFromPanel(step1, { ownerPrimary: { instance: 'feishu' } })
+  assert.equal(stepSwitchInst.ownerPrimary.platform, 'feishu')
+  assert.equal(stepSwitchInst.ownerPrimary.instance, 'feishu')
+  assert.equal(stepSwitchInst.ownerPrimary.account, '')
+
+  // 切换 platform → 清空旧 instance 与 account
+  const stepSwitchPlat = mergeFromPanel(step1, { ownerPrimary: { platform: 'qqbot' } })
+  assert.equal(stepSwitchPlat.ownerPrimary.platform, 'qqbot')
+  assert.equal(stepSwitchPlat.ownerPrimary.instance, '')
+  assert.equal(stepSwitchPlat.ownerPrimary.account, '')
+
+  // 从 fixed 切到 recent → 强制清空三元组
+  const stepRecent = mergeFromPanel(step1, { ownerPrimary: { mode: 'recent' } })
+  assert.deepEqual(stepRecent.ownerPrimary, {
+    mode: 'recent',
+    platform: '',
+    instance: '',
+    account: '',
+    fallback: true,
+    noticeFallback: false,
+  })
+
+  // pickPlatformNeutralConfig 保留 ownerPrimary
+  const picked = pickPlatformNeutralConfig(step1)
+  assert.deepEqual(picked.ownerPrimary, step1.ownerPrimary)
+})
+
+test('P1-2 & P1-3：resolveOwnerRoute 多实例/多账号精确匹配、blocking 语义（unlinked/offline/proactive-none）及 A/B 类回退区分', async (t) => {
+  const dir = makeSandbox(t, 'aurabot-p1-multi-')
+  const mockOb = await startMockOneBot({ selfId: '20000002' })
+  t.after(() => mockOb.close())
+
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({
+    enabled: true,
+    dryRun: false,
+    setupDone: true,
+    gateway: 'onebot',
+    snowluma: { httpUrl: mockOb.httpUrl, wsUrl: mockOb.wsUrl, httpToken: mockOb.token, wsToken: mockOb.token, autoStart: false, autoAttach: false },
+    botQQ: '20000002',
+    ownerQQ: '10001',
+    allow: { private: ['10001'], groups: [] },
+    platforms: {
+      bridge: { enabled: true, token: 'tok-1' },
+      'bridge#2': { enabled: true, token: 'tok-2' },
+    },
+    voice: { engine: 'windows', autoChance: 0 },
+    stickers: { autoChance: 0 },
+  }))
+
+  const fake = createFakeDsh({ brain: async () => '嗯' })
+  fake.ctx.webServer.port = 5101
+  const host = await import('../src/host.js')
+  const api = host.apply(fake.ctx)
+  t.after(async () => {
+    fake.dispose()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+  await api.ready.catch(() => {})
+
+  assert.equal(await waitUntil(() => {
+    const gw = api.gateway
+    const list = gw?.instances?.() || []
+    return list.some((x) => x.instance === 'bridge' && x.state === 'connected')
+      && list.some((x) => x.instance === 'bridge#2' && x.state === 'connected')
+  }), true, 'bridge 与 bridge#2 均应连接成功')
+
+  // 确认旧版 QQ 已连上（legacy external instance）
+  assert.equal(await waitUntil(() => mockOb.connected() >= 1 && api.resolveOwnerRoute().reason === 'ok', 4000), true)
+
+  // 1) 未配置 ownerPrimary（向后兼容）：旧版 QQ / 网关正常生效
+  assert.equal(api.resolveOwnerRoute({ purpose: 'proactive' }).chatId, 'private:10001')
+
+  // 给主人绑定两个 bridge 账号与一个 qqbot 账号，再解绑第三个账号用于校验越权/解绑
+  const ownerId = api.hub.sessions && (await fake.call('/platforms/people')).json().owner
+  assert.ok(ownerId)
+  // 用 identity 通过 platform/unlink API 测试解绑前先通过 bridge/inbound 或 hub 无法直接 link？改为验证 gateway.identity
+  const gw = api.gateway
+  gw.identity.link('bridge', 'b_one', ownerId, 'manual')
+  gw.identity.link('bridge', 'b_two', ownerId, 'manual')
+  gw.identity.link('bridge', 'b_unseen', ownerId, 'manual')
+  // 记录实例级账号归属：b_one 属于 bridge，b_two 属于 bridge#2（同平台多实例隔离）；b_unseen 从未在任何实例出现
+  gw.routing.noteAccountInstance('bridge', 'bridge', 'b_one')
+  gw.routing.noteAccountInstance('bridge#2', 'bridge', 'b_two')
+  assert.deepEqual(gw.routing.instancesForAccount('bridge', 'b_one'), ['bridge'])
+  assert.deepEqual(gw.routing.instancesForAccount('bridge', 'b_two'), ['bridge#2'])
+  assert.deepEqual(gw.routing.instancesForAccount('bridge', 'b_unseen'), [])
+  assert.deepEqual(gw.routing.accountsForInstance('bridge', 'bridge'), ['b_one'])
+  assert.deepEqual(gw.routing.accountsForInstance('bridge#2', 'bridge'), ['b_two'])
+  const otherPerson = gw.identity.resolve('bridge', 'b_stranger')
+  assert.notEqual(otherPerson, ownerId)
+
+  // bridge 仅开启收消息能力（proactive === 'none'），bridge#2 声明 proactive === 'free'
+  await callBridgeHello(fake, 'bridge#2', 'tok-2', { proactive: 'free' })
+
+  // 1b) 无 ownerPrimary 且主人最近在 bridge#2 私聊过（router.seen 已记）+ QQ 在线 → 主动消息与通知仍优先 QQ，不漂移到 seen！
+  gw.noteSeen(ownerId, 'bridge#2:private:b_two', Date.now())
+  assert.equal(api.resolveOwnerRoute({ purpose: 'proactive' }).chatId, 'private:10001')
+  assert.equal(api.resolveOwnerRoute({ purpose: 'notice' }).chatId, 'private:10001')
+
+  // 2) 多实例 + 多账号精确命中 bridge#2 + b_two（即便 bridge 在前且 caps.proactive === 'none'、QQ 在线）
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'b_two', fallback: false, noticeFallback: true },
+  }))
+  const hitMulti = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(hitMulti.blocked, false)
+  assert.equal(hitMulti.reason, 'ok')
+  assert.equal(hitMulti.chatId, 'bridge#2:private:b_two')
+  assert.deepEqual(hitMulti.target, { platform: 'bridge', instance: 'bridge#2', account: 'b_two' })
+  assert.equal(api.proactHealth(), null)
+
+  // 3) 仅清空 account (account: '') → 优先按目标实例 bridge#2 自动选中 b_two（绝不盲取 b_one）
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: '' },
+  }))
+  const hitAutoAcc = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(hitAutoAcc.blocked, false)
+  assert.equal(hitAutoAcc.chatId, 'bridge#2:private:b_two')
+
+  // 3b) 跨实例错配与同平台多实例未归属账号：
+  //     b_one 属于 bridge → 配到 bridge#2 报 primary-unlinked；
+  //     b_unseen 从未在任何实例出现 → 同平台多实例下无从证明归属 bridge#2，同样报 primary-unlinked
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'b_one', fallback: false },
+  }))
+  const blockedCrossInst = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(blockedCrossInst.blocked, true)
+  assert.equal(blockedCrossInst.reason, 'primary-unlinked')
+  assert.equal(blockedCrossInst.chatId, '')
+
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'b_unseen', fallback: false },
+  }))
+  const blockedUnseenMulti = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(blockedUnseenMulti.blocked, true)
+  assert.equal(blockedUnseenMulti.reason, 'primary-unlinked')
+  assert.equal(blockedUnseenMulti.chatId, '')
+
+  // 4) 指定 instance='bridge'（caps.proactive === 'none'）+ 归属 bridge 的 b_one → fallback=false 阻塞并报 primary-proactive-none，绝不跳去 bridge#2 或 QQ！
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge', account: 'b_one', fallback: false, noticeFallback: true },
+  }))
+  const blockedNone = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(blockedNone.blocked, true)
+  assert.equal(blockedNone.reason, 'primary-proactive-none')
+  assert.equal(blockedNone.chatId, '')
+  assert.equal(api.hub.ownerChat(), '')
+  assert.equal(api.proactHealth()?.reason, 'primary-proactive-none')
+
+  // 同一配置下 purpose: 'notice'（noticeFallback: true）→ 允许回退到 online & proactive!=='none' 的 bridge#2（绝不选 caps='none'）
+  const noticeFallback = api.resolveOwnerRoute({ purpose: 'notice' })
+  assert.equal(noticeFallback.blocked, false)
+  assert.equal(noticeFallback.fallbackUsed, true)
+  assert.equal(noticeFallback.reason, 'fallback-used')
+  assert.equal(noticeFallback.chatId, 'bridge#2:private:b_two')
+
+  // 关闭 noticeFallback → /test-send 必须返回 blocked: true 且不发出消息
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { noticeFallback: false },
+  }))
+  const obSentBefore = mockOb.sent('send_private_msg').length
+  const testSendBlocked = (await fake.call('/test-send', {})).json()
+  assert.equal(testSendBlocked.ok, false)
+  assert.equal(testSendBlocked.blocked, true)
+  assert.equal(testSendBlocked.reason, 'primary-proactive-none')
+  assert.equal(mockOb.sent('send_private_msg').length, obSentBefore)
+
+  // 5) 账号解绑或属于别人 → primary-unlinked（即便 fallback=false 且同类 bridge 其他账号还在）
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'b_stranger', fallback: false },
+  }))
+  const blockedOther = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(blockedOther.blocked, true)
+  assert.equal(blockedOther.reason, 'primary-unlinked')
+  assert.equal(blockedOther.chatId, '')
+
+  gw.identity.unlink('bridge', 'b_unseen')
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'b_unseen', fallback: false },
+  }))
+  const blockedUnlinked = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(blockedUnlinked.blocked, true)
+  assert.equal(blockedUnlinked.reason, 'primary-unlinked')
+  assert.equal(blockedUnlinked.chatId, '')
+
+  // 6) 实例离线 / 停用 → primary-offline（fallback=false 阻塞；fallback=true 回退）
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge#missing', account: 'b_one', fallback: false },
+  }))
+  const blockedOffline = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(blockedOffline.blocked, true)
+  assert.equal(blockedOffline.reason, 'primary-offline')
+  assert.equal(blockedOffline.chatId, '')
+
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { fallback: true },
+  }))
+  const allowProactiveFallback = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(allowProactiveFallback.blocked, false)
+  assert.equal(allowProactiveFallback.fallbackUsed, true)
+  assert.equal(allowProactiveFallback.reason, 'fallback-used')
+  assert.match(allowProactiveFallback.chatId, /^bridge#2:private:/)
+
+  // 7) 明确选择旧版直连 QQ 且在线 → 返回 private:10001 并清除 blocked 健康态
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'qq', instance: 'qq', account: '10001', fallback: false },
+  }))
+  const hitLegacyQq = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(hitLegacyQq.blocked, false)
+  assert.equal(hitLegacyQq.reason, 'ok')
+  assert.equal(hitLegacyQq.chatId, 'private:10001')
+  assert.equal(api.proactHealth(), null)
+})
+
+test('P1-4：hub.ownerChat() 注入 resolveOwnerRoute 后在 blocked 与 no-route 时均严格返回空串，绝不穿透回 QQ', (t) => {
+  const dir = makeSandbox(t, 'aurabot-p1-hub-')
+  const identity = createIdentity({ dataDir: join(dir, 'gw'), log: noopLog })
+  const owner = identity.claimOwner('qq', '10001')
+  identity.link('feishu', 'ou_owner', owner, 'owner')
+
+  const cfg = normalize({
+    enabled: true, dryRun: true, setupDone: true, botQQ: '20000002', ownerQQ: '10001',
+    voice: { enabled: false }, merge: { enabled: false }, stickers: { enabled: false, collect: false },
+    allow: { private: ['10001'], groups: [] },
+  })
+
+  let currentRoute = { chatId: '', blocked: true, reason: 'primary-offline', target: null, fallbackUsed: false }
+  const fake = createFakeDsh({ brain: async () => '' })
+  const hub = createHub({
+    dsh: fake.ctx,
+    getConfig: () => cfg,
+    log: noopLog,
+    gateway: { routeTo: () => 'feishu:private:ou_owner' },
+    identity,
+    resolveOwnerRoute: () => currentRoute,
+    routeOwner: () => (currentRoute.blocked ? '' : currentRoute.chatId),
+  })
+  t.after(() => {
+    hub.dispose()
+    fake.dispose()
+  })
+
+  // blocked: true 不穿透到 gateway.routeTo / private:10001 / accounts[0]
+  assert.equal(hub.ownerChat(), '')
+
+  // reason: 'no-route' 同样不穿透
+  currentRoute = { chatId: '', blocked: false, reason: 'no-route', target: null, fallbackUsed: false }
+  assert.equal(hub.ownerChat(), '')
+
+  // 正常命中则返回目标 chatId
+  currentRoute = { chatId: 'feishu:private:ou_owner', blocked: false, reason: 'ok', target: null, fallbackUsed: false }
+  assert.equal(hub.ownerChat(), 'feishu:private:ou_owner')
+})
+
+test('P1-5：resolveOwnerRoute 纯只读零写 router.json；启动迁移与 setConfig 仅按非空幂等清理 router.fixed[owner] 一次', async (t) => {
+  const dir = makeSandbox(t, 'aurabot-p1-readonly-')
+  const routerDir = join(dir, 'gateway', 'gateway')
+  const routerFile = join(routerDir, 'router.json')
+
+  const identity = createIdentity({ dataDir: join(dir, 'gateway'), log: noopLog })
+  const owner = identity.claimOwner('qq', '10001')
+  identity.link('bridge', 'b_owner', owner, 'manual')
+
+  // 预置旧版遗留的 router.fixed[owner] = 'bridge'
+  mkdirSync(routerDir, { recursive: true })
+  writeFileSync(routerFile, JSON.stringify({
+    fixed: { [owner]: 'bridge' },
+    seen: {},
+    kinds: {},
+  }))
+
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({
+    enabled: false,
+    dryRun: true,
+    setupDone: true,
+    platforms: { bridge: { enabled: true, token: 'tok-ro' } },
+    snowluma: { autoStart: false, autoAttach: false },
+    voice: { engine: 'windows', autoChance: 0 },
+    stickers: { autoChance: 0 },
+  }))
+
+  const fake = createFakeDsh({ brain: async () => '' })
+  fake.ctx.webServer.port = 5102
+  const host = await import('../src/host.js')
+  const api = host.apply(fake.ctx)
+  t.after(async () => {
+    fake.dispose()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+  await api.ready.catch(() => {})
+
+  assert.equal(await waitUntil(() => {
+    const list = api.gateway?.instances?.() || []
+    return list.some((x) => x.instance === 'bridge' && x.state === 'connected')
+  }), true)
+
+  // 启动迁移应将旧 router.fixed[owner]='bridge' 迁入 ownerPrimary.platform 并清零 router.fixed[owner]
+  assert.equal(api.getConfig().ownerPrimary.platform, 'bridge')
+  assert.equal(existsSync(routerFile), true)
+  const afterMigrate = JSON.parse(readFileSync(routerFile, 'utf8'))
+  assert.equal(afterMigrate.fixed?.[owner] || '', '')
+
+  // 监测 setFixed 调用与 router.json 修改时间戳
+  const originalSetFixed = api.gateway.routing.setFixed
+  let setFixedCount = 0
+  api.gateway.routing.setFixed = (...args) => {
+    setFixedCount += 1
+    return originalSetFixed(...args)
+  }
+  const mtimeBeforeRead = statSync(routerFile).mtimeMs
+
+  await new Promise((r) => setTimeout(r, 30))
+  // 连续多次只读调用 resolveOwnerRoute（无论 ok / blocked / recent）：0 次 setFixed、router.json 零写入
+  await callBridgeHello(fake, 'bridge', 'tok-ro', { proactive: 'free' })
+  for (let i = 0; i < 5; i++) {
+    assert.equal(api.resolveOwnerRoute({ purpose: 'proactive' }).chatId, 'bridge:private:b_owner')
+    assert.equal(api.resolveOwnerRoute({ purpose: 'notice' }).chatId, 'bridge:private:b_owner')
+  }
+  assert.equal(setFixedCount, 0, 'resolveOwnerRoute 绝不能调用 setFixed')
+  assert.equal(statSync(routerFile).mtimeMs, mtimeBeforeRead, 'resolveOwnerRoute 绝不能写 router.json')
+
+  // 当 router.fixed[owner] 已清空后，重复 setConfig 保存配置不得再写 router.json 或调 setFixed
+  api.setConfig(mergeFromPanel(api.getConfig(), { ownerPrimary: { mode: 'recent' } }))
+  api.setConfig(mergeFromPanel(api.getConfig(), { ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge', account: 'b_owner' } }))
+  assert.equal(setFixedCount, 0, 'router.fixed[owner] 已为空时，setConfig 不得反复调 setFixed')
+  assert.equal(statSync(routerFile).mtimeMs, mtimeBeforeRead, 'router.fixed[owner] 已为空时，setConfig 不得重写 router.json')
+
+  // 若外部遗留写入了非空 fixed，下一次 setConfig 应幂等清理一次
+  originalSetFixed(owner, 'qq')
+  assert.equal(api.gateway.routing.fixedPlatform(owner), 'qq')
+  api.setConfig(mergeFromPanel(api.getConfig(), { ownerPrimary: { mode: 'recent' } }))
+  assert.equal(setFixedCount, 1, '检测到非空 router.fixed[owner] 时 setConfig 清理一次')
+  assert.equal(api.gateway.routing.fixedPlatform(owner), null)
+})
+
+test('P1-6：syncOwnerFixedCleanup 迁入 saveConfig 失败时保留旧 router.fixed 供下次启动重试', async (t) => {
+  const dir = makeSandbox(t, 'aurabot-p1-migrate-fail-')
+  const routerDir = join(dir, 'gateway', 'gateway')
+  const routerFile = join(routerDir, 'router.json')
+
+  const identity = createIdentity({ dataDir: join(dir, 'gateway'), log: noopLog })
+  const owner = identity.claimOwner('qq', '10001')
+  identity.link('bridge', 'b_owner', owner, 'manual')
+
+  mkdirSync(routerDir, { recursive: true })
+  writeFileSync(routerFile, JSON.stringify({
+    fixed: { [owner]: 'bridge' },
+    seen: {},
+    kinds: {},
+  }))
+
+  const cfgFile = join(dir, 'config.json')
+  writeFileSync(cfgFile, JSON.stringify({
+    enabled: false,
+    dryRun: true,
+    setupDone: true,
+    platforms: {},
+    snowluma: { autoStart: false, autoAttach: false },
+    voice: { engine: 'windows', autoChance: 0 },
+    stickers: { autoChance: 0 },
+  }))
+
+  const fake = createFakeDsh({ brain: async () => '' })
+  fake.ctx.webServer.port = 5103
+  const host = await import('../src/host.js')
+  const api = host.apply(fake.ctx)
+  t.after(async () => {
+    fake.dispose()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+  await api.ready.catch(() => {})
+
+  // 制造 saveConfig 落盘失败条件：将 config.json 替换为同名目录（renameSync 必然抛错）
+  unlinkSync(cfgFile)
+  mkdirSync(cfgFile, { recursive: true })
+
+  // 触发懒建网关与 syncOwnerFixedCleanup({ allowMigrate: true })
+  await fake.call('/platforms/people')
+
+  // 迁移写配置失败时，旧 router.fixed[owner] 必须原样保留，绝不清空
+  const preserved = JSON.parse(readFileSync(routerFile, 'utf8'))
+  assert.equal(preserved.fixed?.[owner], 'bridge')
+  assert.equal(api.gateway?.routing?.fixedPlatform?.(owner), 'bridge')
+})
+
+test('P1-7：旧配置无 ownerPrimary 时即使 router.seen 为其他平台仍默认回 QQ（QQ离线阻塞不漂移、显式 recent 才跟随、未观测单实例给告警）', async (t) => {
+  const dir = makeSandbox(t, 'aurabot-p1-legacy-qq-')
+  const mockOb = await startMockOneBot({ selfId: '20000002' })
+  t.after(() => mockOb.close())
+
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({
+    enabled: true,
+    dryRun: false,
+    setupDone: true,
+    gateway: 'onebot',
+    snowluma: { httpUrl: mockOb.httpUrl, wsUrl: mockOb.wsUrl, httpToken: mockOb.token, wsToken: mockOb.token, autoStart: false, autoAttach: false },
+    botQQ: '20000002',
+    ownerQQ: '10001',
+    allow: { private: ['10001'], groups: [] },
+    platforms: { bridge: { enabled: true, token: 'tok-single' } },
+    voice: { engine: 'windows', autoChance: 0 },
+    stickers: { autoChance: 0 },
+  }))
+
+  const fake = createFakeDsh({ brain: async () => '嗯' })
+  fake.ctx.webServer.port = 5104
+  const host = await import('../src/host.js')
+  const api = host.apply(fake.ctx)
+  t.after(async () => {
+    fake.dispose()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+  await api.ready.catch(() => {})
+
+  assert.equal(await waitUntil(() => {
+    const list = api.gateway?.instances?.() || []
+    return list.some((x) => x.instance === 'bridge' && x.state === 'connected')
+  }), true)
+  assert.equal(await waitUntil(() => mockOb.connected() >= 1 && api.resolveOwnerRoute().reason === 'ok', 4000), true)
+
+  const gw = api.gateway
+  const ownerId = gw.identity.owner()
+  gw.identity.link('bridge', 'b_single_unseen', ownerId, 'manual')
+  await callBridgeHello(fake, 'bridge', 'tok-single', { proactive: 'free' })
+  gw.noteSeen(ownerId, 'bridge:private:b_single_unseen', Date.now())
+
+  // 未配置 ownerPrimary + bridge 已在 seen + QQ 在线 → 必须回 QQ
+  const hitLegacy = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(hitLegacy.blocked, false)
+  assert.equal(hitLegacy.reason, 'ok')
+  assert.equal(hitLegacy.chatId, 'private:10001')
+
+  // 若此时 QQ 离线且未开启回退（默认 fallback: false）：proactive 不得漂移到 router.seen（bridge），notice 允许回退
+  api.onebot.stop()
+  const offProactive = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(offProactive.blocked, true)
+  assert.equal(offProactive.reason, 'primary-offline')
+  assert.equal(offProactive.chatId, '')
+  assert.equal(api.hub.ownerChat(), '')
+
+  const offNotice = api.resolveOwnerRoute({ purpose: 'notice' })
+  assert.equal(offNotice.blocked, false)
+  assert.equal(offNotice.fallbackUsed, true)
+  assert.equal(offNotice.chatId, 'bridge:private:b_single_unseen')
+
+  // 显式切到 mode='recent' 后，才允许跟随 router.seen 发给 bridge
+  api.setConfig(mergeFromPanel(api.getConfig(), { ownerPrimary: { mode: 'recent' } }))
+  const hitRecent = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(hitRecent.blocked, false)
+  assert.equal(hitRecent.reason, 'ok')
+  assert.equal(hitRecent.chatId, 'bridge:private:b_single_unseen')
+
+  // 单实例平台 + 未观测到 instanceAccounts 仅绑定了账号时：允许按唯一单实例发送，且不改写 router.json
+  gw.identity.link('bridge', 'b_only_linked', ownerId, 'manual')
+  api.setConfig(mergeFromPanel(api.getConfig(), {
+    ownerPrimary: { mode: 'fixed', platform: 'bridge', instance: 'bridge', account: 'b_only_linked', fallback: false },
+  }))
+  const hitSingleUnseen = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(hitSingleUnseen.blocked, false)
+  assert.equal(hitSingleUnseen.chatId, 'bridge:private:b_only_linked')
+})
+
+test('P1-8：旧 router.json 仅含 seen 无 instanceAccounts 时只读推导实例归属，且 allowMigrate=false 不清未迁移 fixed', async (t) => {
+  const dir = makeSandbox(t, 'aurabot-p1-seen-fallback-')
+  const routerDir = join(dir, 'gateway', 'gateway')
+  const routerFile = join(routerDir, 'router.json')
+  mkdirSync(routerDir, { recursive: true })
+  writeFileSync(routerFile, JSON.stringify({
+    fixed: {},
+    seen: { 'p-owner': { chatId: 'feishu#2:private:ou_old', at: 1700000000000 } },
+    kinds: {},
+  }))
+  const mtimeBefore = statSync(routerFile).mtimeMs
+
+  const router = createRouter({ file: routerFile, log: noopLog })
+  assert.deepEqual(router.instancesForAccount('feishu', 'ou_old'), ['feishu#2'])
+  assert.deepEqual(router.accountsForInstance('feishu#2', 'feishu'), ['ou_old'])
+  assert.equal(statSync(routerFile).mtimeMs, mtimeBefore, '只读推导不得写 router.json')
+
+  // 验证 allowMigrate=false 时：当 ownerPrimary 仍为空（fixed + platform/instance 均空），setConfig 不得清掉外部/未迁移的 router.fixed
+  const cfgDir = makeSandbox(t, 'aurabot-p1-nomigrate-clear-')
+  writeFileSync(join(cfgDir, 'config.json'), JSON.stringify({
+    enabled: false,
+    dryRun: true,
+    setupDone: true,
+    platforms: { bridge: { enabled: true, token: 'tok-nm' } },
+    snowluma: { autoStart: false, autoAttach: false },
+    voice: { engine: 'windows', autoChance: 0 },
+    stickers: { autoChance: 0 },
+  }))
+  const fake = createFakeDsh({ brain: async () => '' })
+  fake.ctx.webServer.port = 5105
+  const host = await import('../src/host.js')
+  const api = host.apply(fake.ctx)
+  t.after(async () => {
+    fake.dispose()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+  await api.ready.catch(() => {})
+  assert.equal(await waitUntil(() => (api.gateway?.instances?.() || []).some((x) => x.instance === 'bridge')), true)
+
+  const gw = api.gateway
+  const ownerId = gw.identity.claimOwner('bridge', 'b_nm')
+  gw.routing.setFixed(ownerId, 'bridge')
+  assert.equal(gw.routing.fixedPlatform(ownerId), 'bridge')
+  api.setConfig(mergeFromPanel(api.getConfig(), { dryRun: false }))
+  assert.equal(gw.routing.fixedPlatform(ownerId), 'bridge', 'ownerPrimary 尚未写入时 allowMigrate=false 不得清掉未迁移的 fixed')
+})
+
+test('P1-9：存在已停用的 QQ 实例配置（platforms.qq.enabled=false）且直连 QQ 关闭时，不误判 implicitLegacyQq 阻塞其他平台', async (t) => {
+  const dir = makeSandbox(t, 'aurabot-p1-disabled-qq-')
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({
+    enabled: false,
+    dryRun: true,
+    setupDone: true,
+    ownerQQ: '',
+    platforms: {
+      qq: { enabled: false },
+      bridge: { enabled: true, token: 'tok-dq' },
+    },
+    snowluma: { autoStart: false, autoAttach: false },
+    voice: { engine: 'windows', autoChance: 0 },
+    stickers: { autoChance: 0 },
+  }))
+
+  const fake = createFakeDsh({ brain: async () => '' })
+  fake.ctx.webServer.port = 5106
+  const host = await import('../src/host.js')
+  const api = host.apply(fake.ctx)
+  t.after(async () => {
+    fake.dispose()
+    await new Promise((r) => setTimeout(r, 30))
+  })
+  await api.ready.catch(() => {})
+  assert.equal(await waitUntil(() => {
+    const list = api.gateway?.instances?.() || []
+    return list.some((x) => x.instance === 'bridge' && x.state === 'connected')
+  }), true)
+
+  const gw = api.gateway
+  const ownerId = gw.identity.claimOwner('qq', '10001')
+  gw.identity.link('bridge', 'b_dq', ownerId, 'manual')
+  await callBridgeHello(fake, 'bridge', 'tok-dq', { proactive: 'free' })
+  gw.noteSeen(ownerId, 'bridge:private:b_dq', Date.now())
+
+  // 主人名下有 qq 账号且 platforms.qq 存在但 enabled=false，直连 QQ 也未启用 → 不得按 implicitLegacyQq 报 primary-offline，应正常走可用平台
+  const route = api.resolveOwnerRoute({ purpose: 'proactive' })
+  assert.equal(route.blocked, false)
+  assert.equal(route.reason, 'ok')
+  assert.equal(route.chatId, 'bridge:private:b_dq')
+})

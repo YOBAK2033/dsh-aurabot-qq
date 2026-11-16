@@ -21,6 +21,14 @@ export const DEFAULTS = {
   ownerQQ: '', // 主人 QQ 号（向导里填）
   ownerName: '主人',
   ownerLevel: 'full', // full | social | chat
+  ownerPrimary: {
+    mode: 'fixed', // 'fixed'（固定主账号）| 'recent'（跟随最近私聊平台）
+    platform: '',
+    instance: '',
+    account: '',
+    fallback: false, // A 类普通主动消息在主账号不可达时是否允许跨平台回退
+    noticeFallback: true, // B 类系统重要通知在主账号不可达时是否允许跨平台回退
+  },
   approvalNotify: true, // DSH 要授权时把请求发到主人私聊
   // 什么情况往主人 QQ 上报：enabled 是总开关，approval = 工具要授权，question = 她要向人提问选选项。
   // workspaces 按工作区单独覆盖：{ "<工作区路径>": { approval?: bool, question?: bool } }，没写的项跟随总开关。
@@ -520,6 +528,22 @@ function normalizePlatforms(raw, gateway) {
   return out
 }
 
+function normalizeOwnerPrimary(raw) {
+  const src = isObj(raw) ? raw : {}
+  const mode = src.mode === 'recent' ? 'recent' : 'fixed'
+  const platform = mode === 'recent' ? '' : String(src.platform ?? '').trim()
+  const instance = mode === 'recent' ? '' : String(src.instance ?? '').trim()
+  const account = mode === 'recent' ? '' : String(src.account ?? '').trim()
+  return {
+    mode,
+    platform,
+    instance,
+    account,
+    fallback: src.fallback === true,
+    noticeFallback: src.noticeFallback !== false,
+  }
+}
+
 export function normalize(raw) {  const c = deepMerge(DEFAULTS, raw)
   c.enabled = bool(c.enabled, false)
   c.dryRun = bool(c.dryRun, true)
@@ -542,6 +566,7 @@ export function normalize(raw) {  const c = deepMerge(DEFAULTS, raw)
   c.model.vision = c.model.vision === 'on' || c.model.vision === 'off' ? c.model.vision : 'auto'
   c.setupDone = bool(c.setupDone, false)
   c.ownerLevel = LEVELS.includes(c.ownerLevel) ? c.ownerLevel : 'full'
+  c.ownerPrimary = normalizeOwnerPrimary(c.ownerPrimary)
   c.longTasks = bool(c.longTasks, true)
   c.subagentBackground = bool(c.subagentBackground, false)
   c.chatModels = normalizeChatModels(c.chatModels)
@@ -1187,11 +1212,44 @@ export function mergeFromPanel(current, incoming) {
   if (incoming?.chatModels?.privates) next.chatModels.privates = incoming.chatModels.privates
   if (incoming?.chatModels?.groups) next.chatModels.groups = incoming.chatModels.groups
   if (incoming?.allow) next.allow = { ...current.allow, ...incoming.allow }
+  if (isObj(incoming?.ownerPrimary)) {
+    const before = normalizeOwnerPrimary(current?.ownerPrimary)
+    const inc = incoming.ownerPrimary
+    const targetMode = (inc.mode !== undefined ? inc.mode : before.mode) === 'recent' ? 'recent' : 'fixed'
+    if (targetMode === 'recent') {
+      next.ownerPrimary = {
+        ...next.ownerPrimary,
+        mode: 'recent',
+        platform: '',
+        instance: '',
+        account: '',
+      }
+    } else {
+      const nextPlat = inc.platform !== undefined ? String(inc.platform ?? '').trim() : before.platform
+      const platChanged = inc.platform !== undefined && nextPlat !== before.platform
+      let nextInst = inc.instance !== undefined
+        ? String(inc.instance ?? '').trim()
+        : (platChanged ? '' : before.instance)
+      if (nextPlat === '' && inc.instance === undefined) nextInst = ''
+      const instChanged = inc.instance !== undefined && nextInst !== before.instance
+      let nextAcc = inc.account !== undefined
+        ? String(inc.account ?? '').trim()
+        : ((platChanged || instChanged || (!nextPlat && !nextInst)) ? '' : before.account)
+      if (inc.account !== undefined && String(inc.account ?? '').trim() === '') nextAcc = ''
+      next.ownerPrimary = {
+        ...next.ownerPrimary,
+        mode: 'fixed',
+        platform: nextPlat,
+        instance: nextInst,
+        account: nextAcc,
+      }
+    }
+  }
   return normalize(next)
 }
 
 const LEGACY_NEUTRAL_KEYS = [
-  'ownerQQ', 'ownerName', 'ownerLevel',
+  'ownerQQ', 'ownerName', 'ownerLevel', 'ownerPrimary',
   'persona', 'personas', 'model', 'chatModels', 'chatEfforts', 'memory',
   'merge', 'forward', 'cost', 'diary', 'group', 'titleFilter', 'allow',
   'capabilityAllow', 'commandAllow', 'longTasks', 'subagentBackground',

@@ -101,7 +101,7 @@ export function reallySent (r) {
   return Boolean(r) && r.message_id !== undefined && !String(r.message_id).startsWith('sim-')
 }
 
-export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onMemoryCommand, onCommand, isMuted, dislikes, random = Math.random, moodEffects, localApi, hooks, availableModels, toolsGeneration, capabilitiesOf, gateway = null, identity = null, handover = null, platformLabel: platformLabelInjected = null, routeOwner: routeOwnerInjected = null }) {
+export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onMemoryCommand, onCommand, isMuted, dislikes, random = Math.random, moodEffects, localApi, hooks, availableModels, toolsGeneration, capabilitiesOf, gateway = null, identity = null, handover = null, platformLabel: platformLabelInjected = null, routeOwner: routeOwnerInjected = null, resolveOwnerRoute: resolveOwnerRouteInjected = null }) {
   const ownerRef = () => identity
   const ownerId = () => identity?.owner?.() || null
   const defaultPlatform = () => parseChatId('private:0')?.platform || ''
@@ -119,9 +119,19 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     return parseChatId(String(chatOrId || ''))?.platform || defaultPlatform()
   }
   function resolveOwnerChat() {
+    if (typeof resolveOwnerRouteInjected === 'function') {
+      const route = resolveOwnerRouteInjected({ purpose: 'proactive' })
+      if (!route || route.blocked) return ''
+      return route.chatId ? String(route.chatId) : ''
+    }
     if (typeof routeOwnerInjected === 'function') {
       const hit = routeOwnerInjected()
+      if (hit && typeof hit === 'object') {
+        if (hit.blocked) return ''
+        return hit.chatId ? String(hit.chatId) : ''
+      }
       if (hit) return String(hit)
+      return ''
     }
     const owner = ownerId()
     if (owner && gateway?.routeTo) {
