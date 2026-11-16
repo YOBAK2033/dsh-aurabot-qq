@@ -474,8 +474,16 @@ test('P3-5: 前端 client.js 注册 TAB_KEYS.access、GlobalAccess 主账号与�
       return [node.props?.label, node.props?.hint, textOf(node.children)].filter(Boolean).join(' ')
     }
 
+    const gaText = textOf(tree)
+    assert.match(gaText, /主人的主账号/)
+    assert.match(gaText, /不是机器人自己的账号/)
+    assert.doesNotMatch(gaText, /大肥鱼的主账号/)
+    assert.match(gaText, /主人 · QQ/)
+    assert.match(gaText, /主人 · 飞书/)
+
     const selects = collectNodes(tree, (n) => n.type === 'select')
     assert.equal(selects.length, 1)
+    assert.equal(selects[0].props['aria-label'], '主人的主账号（大肥鱼主动消息接收账号）')
     const opts = collectNodes(selects[0], (n) => n.type === 'option')
     assert.ok(opts.some((o) => o.props.value === '__default__' && textOf(o).includes('有 QQ 时优先 QQ，否则跟随最近平台')))
     assert.ok(opts.some((o) => o.props.value === '__recent__' && textOf(o).includes('recent')))
@@ -545,8 +553,8 @@ test('P3-5: 前端 client.js 注册 TAB_KEYS.access、GlobalAccess 主账号与�
     assert.match(fullText, /允许普通主动聊天改发其他在线平台/)
     assert.match(fullText, /允许系统重要通知与自测提醒改发其他在线平台/)
 
-    // 点击「测试发送给主账号」与切换 fallback 开关
-    const testSendBtn = collectNodes(tree, (n) => n.type?.name === 'Btn' && textOf(n.children).includes('测试发送给主账号'))[0]
+    // 点击「测试发送给主人主账号」与切换 fallback 开关
+    const testSendBtn = collectNodes(tree, (n) => n.type?.name === 'Btn' && textOf(n.children).includes('测试发送给主人主账号'))[0]
     assert.ok(testSendBtn)
     await testSendBtn.props.onClick()
     assert.ok(posted.some((x) => x.url === '/aurabot/api/test-send'))
@@ -595,8 +603,8 @@ test('P3-5: 前端 client.js 注册 TAB_KEYS.access、GlobalAccess 主账号与�
       go() {},
     })
     const platText = textOf(platTree)
-    assert.match(platText, /当前主账号：QQ · 10001/)
-    assert.match(platText, /设为 bridge#2 主账号/)
+    assert.match(platText, /当前主人主账号：QQ · 10001/)
+    assert.match(platText, /设为主人 bridge#2 主账号/)
 
     const unobsQuickBtn = collectNodes(platTree, (n) => n.type?.name === 'Btn' && textOf(n.children).includes('bridge 未观测'))[0]
     assert.ok(unobsQuickBtn)
@@ -606,7 +614,7 @@ test('P3-5: 前端 client.js 注册 TAB_KEYS.access、GlobalAccess 主账号与�
     assert.equal(noInstQuickBtn.props.disabled, true, '无平台实例快捷按钮必须禁用')
 
     // 快捷按钮应走 /platforms/owner/primary
-    const quickPrimaryBtn = collectNodes(platTree, (n) => n.type?.name === 'Btn' && textOf(n.children).includes('设为 bridge#2 主账号'))[0]
+    const quickPrimaryBtn = collectNodes(platTree, (n) => n.type?.name === 'Btn' && textOf(n.children).includes('设为主人 bridge#2 主账号'))[0]
     assert.ok(quickPrimaryBtn)
     await quickPrimaryBtn.props.onClick()
     assert.deepEqual(

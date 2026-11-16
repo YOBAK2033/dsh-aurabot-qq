@@ -1724,7 +1724,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         setBusy('owner-primary')
         try {
           const r = await post('/platforms/owner/primary', patch)
-          toast(r.message || (r.ok ? '已更新主账号' : '没成功'), r.ok ? 'ok' : 'err')
+          toast(r.message || (r.ok ? '已更新主人主账号' : '没成功'), r.ok ? 'ok' : 'err')
           if (r.ok) {
             setPeopleData((cur) => cur ? {
               ...cur,
@@ -1812,7 +1812,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 h('span', { className: 'ab-small ab-muted' }, p.person),
                 p.owner ? h('span', { className: 'ab-badge' }, '主人') : null,
                 p.owner ? h(Fragment, null,
-                  h('span', { className: 'ab-badge mine' }, '当前主账号：' + ownerPrimaryLabel(curPref)),
+                  h('span', { className: 'ab-badge mine' }, '当前主人主账号：' + ownerPrimaryLabel(curPref)),
                   go ? h(Btn, { small: true, kind: 'ghost', onClick: () => go('access') }, '去权限页设置') : null,
                 ) : h(Fragment, null,
                   h('span', { className: 'ab-small ab-muted' }, '固定平台：'),
@@ -1831,21 +1831,21 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                       const isCurrent = isOwnerOptionSelected(curPref, o)
                       const canSelect = isOwnerOptionSelectable(o)
                       const btnTitle = !o.canProactive
-                        ? '仅支持回复，无法设为主账号'
+                        ? '仅支持回复，无法设为主人主账号'
                         : o.hasInstance === false
-                          ? '尚未配置该平台实例，无法设为主账号'
+                          ? '尚未配置该平台实例，无法设为主人主账号'
                           : !canSelect
-                            ? '当前实例尚未观测到该账号，先从该实例发一条私聊后再设为该实例主账号'
-                            : (isCurrent ? '已经是当前主账号' : '将该账号设为主账号')
+                            ? '当前实例尚未观测到该账号，先从该实例发一条私聊后再设为该实例主人主账号'
+                            : (isCurrent ? '已经是当前主人主账号' : '将该账号设为主人主账号（主动消息接收账号）')
                       const btnText = isCurrent
-                        ? '当前主账号'
+                        ? '当前主人主账号'
                         : !o.canProactive
                           ? '仅支持回复'
                           : o.hasInstance === false
                             ? '未配置实例'
                             : !canSelect
                               ? (o.multiInstance ? `${o.instance} 未观测` : '当前实例未观测')
-                              : (o.multiInstance ? `设为 ${o.instance} 主账号` : '设为主账号')
+                              : (o.multiInstance ? `设为主人 ${o.instance} 主账号` : '设为主人主账号')
                       return h(Btn, {
                         key: o.key,
                         small: true,
@@ -2491,11 +2491,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         const instPart = (o.multiInstance || (o.instance && o.instance !== o.platform)) ? ` · ${o.instance}` : ''
         const selectable = isOwnerOptionSelectable(o)
         const statusPart = !o.canProactive
-          ? '（仅支持回复，无法设为主账号）'
+          ? '（仅支持回复，无法设为主人主账号）'
           : o.hasInstance === false
-            ? '（未配置平台实例，无法设为主账号）'
+            ? '（未配置平台实例，无法设为主人主账号）'
             : !selectable
-              ? '（当前实例未观测到，无法设为主账号）'
+              ? '（当前实例未观测到，无法设为主人主账号）'
               : !o.enabled
                 ? '（已停用）'
                 : o.state === 'connected'
@@ -2504,7 +2504,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                     ? '（连接中）'
                     : '（未连接）'
         const unobservedTag = selectable && !o.multiInstance && o.observed === false && !o.legacy ? ' · 未观测' : ''
-        return platformLabel(o.platform) + instPart + ' · ' + o.account + statusPart + unobservedTag
+        return '主人 · ' + platformLabel(o.platform) + instPart + ' · ' + o.account + statusPart + unobservedTag
       }
 
       const proRoute = peopleInfo && peopleInfo.resolvedProactiveRoute
@@ -2516,23 +2516,23 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         if (proRoute.blocked) {
           const targetDesc = ownerTargetText(proRoute.target) || ownerPrimaryLabel(pref)
           const reasonMap = {
-            'primary-unlinked': `当前主账号（${targetDesc}）已从主人名下解绑，请重新选择主账号`,
-            'primary-proactive-none': `当前主账号（${targetDesc}）实例仅支持回复，无法发送主动消息`,
-            'primary-offline': `当前主账号（${targetDesc}）未连接，普通主动消息已暂停发送`,
+            'primary-unlinked': `当前主人主账号（${targetDesc}）已从主人名下解绑，请重新选择主人的主账号`,
+            'primary-proactive-none': `当前主人主账号（${targetDesc}）实例仅支持回复，无法发送主动消息`,
+            'primary-offline': `当前主人主账号（${targetDesc}）未连接，普通主动消息已暂停发送`,
           }
           const noticeDesc = (pref.noticeFallback !== false && noticeRoute && !noticeRoute.blocked)
             ? '；系统重要通知仍允许回退其他在线平台'
             : '；系统重要通知同样已关闭回退'
           return h('div', { className: cx('ab-note', (pref.noticeFallback !== false && noticeRoute && !noticeRoute.blocked) ? 'warn' : 'err'), style: { width: '100%' } },
-            (reasonMap[proRoute.reason] || `当前主账号（${targetDesc}）不可用（${proRoute.reason}），普通主动消息已暂停发送`) + noticeDesc)
+            (reasonMap[proRoute.reason] || `当前主人主账号（${targetDesc}）不可用（${proRoute.reason}），普通主动消息已暂停发送`) + noticeDesc)
         }
         if (proRoute.chatId) {
           const desc = ownerTargetText(proRoute.target) || proRoute.chatId
           if (proRoute.fallbackUsed) {
-            return h('div', { className: 'ab-note warn', style: { width: '100%' } }, '主账号当前不可用，已按回退策略路由至：' + desc)
+            return h('div', { className: 'ab-note warn', style: { width: '100%' } }, '主人主账号当前不可用，已按回退策略路由至：' + desc)
           }
           return h('div', { className: 'ab-small ab-muted', style: { width: '100%' } },
-            '当前主动消息将发往：' + desc + (lastBlocked ? `（最近曾阻塞：${lastBlocked.reason}）` : ''))
+            '当前主动消息将发往主人账号：' + desc + (lastBlocked ? `（最近曾阻塞：${lastBlocked.reason}）` : ''))
         }
         return h('div', { className: 'ab-note warn', style: { width: '100%' } },
           proRoute.reason === 'no-owner' ? '尚未认领主人身份，当前无法发送主动消息' : '当前没有可用的在线平台可发送主动消息')
@@ -2561,23 +2561,23 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 h('code', { className: 'ab-small' }, ownerPersonId),
                 ownerAccSummary ? h('span', { className: 'ab-small ab-muted' }, ownerAccSummary) : null)
               : h('span', { className: 'ab-muted ab-small' }, '尚未认主（请到「通讯平台」或向导中认领主人）')),
-          h(Row, { label: '大肥鱼的主账号（主动消息接收账号）', hint: '指定 ta 主动私聊找你、汇报结果或自测提醒时发往哪一个平台账号；不影响你在当前会话里和 ta 聊天时的原地回复。' },
+          h(Row, { label: '主人的主账号（大肥鱼主动消息接收账号）', hint: '这里选的是主人的账号，不是机器人自己的账号。ta 主动私聊你、汇报结果或自测提醒时，会用自己的平台账号发到这个接收账号；不影响你在当前会话里和 ta 聊天时的原地回复。' },
             h('div', { style: { width: '100%', display: 'flex', flexDirection: 'column', gap: 6 } },
               h('div', { className: 'ab-flex', style: { gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
-                h('select', { className: 'ab-select', 'aria-label': '大肥鱼的主账号', value: selectValue, onChange: (e) => onSelectPrimary(e.target.value) },
+                h('select', { className: 'ab-select', 'aria-label': '主人的主账号（大肥鱼主动消息接收账号）', value: selectValue, onChange: (e) => onSelectPrimary(e.target.value) },
                   h('option', { value: '__default__' }, '未单独指定（有 QQ 时优先 QQ，否则跟随最近平台）'),
                   h('option', { value: '__recent__' }, '跟随最近私聊平台（recent）'),
                   options.map((o) => h('option', { key: o.key, value: optValue(o), disabled: !isOwnerOptionSelectable(o) }, formatOptLabel(o))),
-                  selectValue === '__orphan__' ? h('option', { value: '__orphan__' }, ownerPrimaryLabel(pref) + '（当前配置，待刷新或已解绑）') : null),
-                h(Btn, { small: true, disabled: testSending, onClick: testSend }, testSending ? '发送中…' : '测试发送给主账号'),
+                  selectValue === '__orphan__' ? h('option', { value: '__orphan__' }, ownerPrimaryLabel(pref) + '（当前主人主账号配置，待刷新或已解绑）') : null),
+                h(Btn, { small: true, disabled: testSending, onClick: testSend }, testSending ? '发送中…' : '测试发送给主人主账号'),
               ),
-              hasUnsavedPrimary ? h('div', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, '有未保存的主账号改动，请点击底部「保存设置」后再生效/测试。') : null,
+              hasUnsavedPrimary ? h('div', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, '有未保存的主人主账号改动，请点击底部「保存设置」后再生效/测试。') : null,
               routeStatusNode,
               testResult ? h('div', { className: cx('ab-note', testResult.ok ? '' : (testResult.blocked ? 'warn' : 'err')), style: { width: '100%' } },
                 (testResult.message || '') + (testResult.fallbackUsed ? '（本次通过回退平台发出）' : '')) : null,
             )),
-          h(Row, { label: '主账号不可用时，允许普通主动聊天改发其他在线平台', hint: '默认关闭。关闭时若主账号离线或未绑定，ta 会暂停主动搭话、汇报等普通主动消息，绝不串发到其他平台。' }, f.sw('ownerPrimary.fallback')),
-          h(Row, { label: '主账号不可用时，允许系统重要通知与自测提醒改发其他在线平台（不含无会话危险操作）', hint: '默认开启。仅影响系统提醒与「测试发送给主账号」；无归属会话的危险操作与授权仍按原地 fail-closed 处理。' }, f.sw('ownerPrimary.noticeFallback')),
+          h(Row, { label: '主人主账号不可用时，允许普通主动聊天改发其他在线平台', hint: '默认关闭。关闭时若主人主账号离线或未绑定，ta 会暂停主动搭话、汇报等普通主动消息，绝不串发到其他平台。' }, f.sw('ownerPrimary.fallback')),
+          h(Row, { label: '主人主账号不可用时，允许系统重要通知与自测提醒改发其他在线平台（不含无会话危险操作）', hint: '默认开启。仅影响系统提醒与「测试发送给主人主账号」；无归属会话的危险操作与授权仍按原地 fail-closed 处理。' }, f.sw('ownerPrimary.noticeFallback')),
           h(Row, { label: '主人 QQ 号（可选）', hint: '仅在使用 QQ 网关或兼容旧 QQ 功能时填写；纯飞书 / QQ 官方机器人 / 通用桥主人认主后可留空。修改此项会重置当前敏感命令授权代次。' }, f.text('ownerQQ', { placeholder: ownerPersonId ? '纯非 QQ 平台可留空' : '例如 123456789' })),
           h(Row, { label: 'ta怎么称呼你' }, f.text('ownerName', { placeholder: '主人' })),
           h(Row, { label: '主人私聊的权限', hint: '群聊永远没有电脑操作权限，这里管不到群。' },
