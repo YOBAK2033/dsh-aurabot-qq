@@ -69,12 +69,12 @@ function parsePrivateTarget(to) {
   }
   const segs = s.split(':')
   if (segs.length === 3 && segs[1].trim().toLowerCase() === 'private') {
-    const plat = segs[0].trim()
+    const plat = segs[0].trim().split('#')[0].trim()
     const id = segs[2].trim()
     return plat && id ? { platform: plat, id } : null
   }
   if (segs.length >= 4 && segs[2].trim().toLowerCase() === 'private') {
-    const plat = segs[0].trim()
+    const plat = segs[0].trim().split('#')[0].trim()
     const id = segs.slice(3).join(':').trim()
     return plat && id ? { platform: plat, id } : null
   }
@@ -132,8 +132,14 @@ function isGovernedTarget(to, identity) {
     if (person) return Boolean(identity.isOwner?.(person))
   }
   const owner = typeof identity.owner === 'function' ? identity.owner() : null
-  if (owner && typeof identity.accountOn === 'function') {
-    return identity.accountOn(owner, parsed.platform) === parsed.id
+  if (owner) {
+    if (typeof identity.accountsOf === 'function') {
+      const accs = identity.accountsOf(owner) || []
+      if (accs.some((a) => a && a.platform === parsed.platform && String(a.account) === parsed.id)) return true
+    }
+    if (typeof identity.accountOn === 'function') {
+      return identity.accountOn(owner, parsed.platform) === parsed.id
+    }
   }
   return false
 }

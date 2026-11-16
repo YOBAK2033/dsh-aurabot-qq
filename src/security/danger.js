@@ -437,11 +437,13 @@ const clip = (text, n = 300) => (text.length > n ? text.slice(0, n) + '…' : te
  * @param {(sessionId:string) => string} o.chatOfSession DSH session → chatId
  * @param {(sessionId:string) => boolean} [o.isOwnedSession] 这个会话是不是 aurabot 自己开的（聊天映射来的）
  * @param {object} [o.identity] 身份服务
- * @param {(platform?:string) => string|null} [o.routeOwner] 主人兜底路由
+ * @param {(platform?:string) => string|null} [o.routeOwner] 主人兜底路由（旧别名，兼容单测）
+ * @param {(opts?:{purpose?:string}) => (string|{chatId?:string,blocked?:boolean}|null)} [o.resolveNoticeOwnerChat] B 类通知解析器
  * @param {number} [o.timeoutMs] 等确认的超时（默认 60 秒）
  * @param {object} [o.log]
  */
-export function createDangerGuard ({ getConfig, deliver, chatOfSession, isOwnedSession, identity, routeOwner, timeoutMs = 60_000, log } = {}) {
+export function createDangerGuard ({ getConfig, deliver, chatOfSession, isOwnedSession, identity, resolveNoticeOwnerChat, routeOwner, timeoutMs = 60_000, log } = {}) {
+  const noticeResolver = resolveNoticeOwnerChat || routeOwner
   const pending = new Map() // chatId → { resolve, timer }
   let disposed = false
   const pendingKey = (chatId) => normalizeChatId(chatId) || String(chatId || '').trim()
@@ -490,7 +492,7 @@ export function createDangerGuard ({ getConfig, deliver, chatOfSession, isOwnedS
     }
     const rawChat = chatOfSession ? String(chatOfSession(sessionId) || '') : ''
     const ownerBefore = typeof identity?.owner === 'function' ? identity.owner() : null
-    const targetChat = rawChat && ownerBefore ? resolveConfirmChat(identity, rawChat, routeOwner) : ''
+    const targetChat = rawChat && ownerBefore ? resolveConfirmChat(identity, rawChat, noticeResolver) : ''
     // 是我的会话但认不出聊天（比如会话刚建立、映射还没落盘）或非主人私聊：不敢放也不敢问，仍然拦下
     if (!targetChat) {
       log?.warn?.(`危险命令已拦下（非主人私聊 ${rawChat || '未知'}）：${clip(command, 120)}`)

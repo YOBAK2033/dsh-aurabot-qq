@@ -88,12 +88,16 @@ export function isOwnerPrivateChat(ownerRef, chatOrId, userId) {
   return true
 }
 
-/** 解析安全确认目标私聊：仅当触发会话本身是主人私聊时返回规范化 chatId（群聊或陌生人私聊绝不回退打扰主人）；未传触发会话时才用 routeOwner 兜底。 */
-export function resolveConfirmChat(ownerRef, triggeringChatId, routeOwner) {
+/** 解析安全确认目标私聊：仅当触发会话本身是主人私聊时返回规范化 chatId（群聊或陌生人私聊绝不回退打扰主人）；仅显式传空触发会话时才查 resolveNoticeOwnerChat。 */
+export function resolveConfirmChat(ownerRef, triggeringChatId, resolveNoticeOwnerChat) {
   const norm = normalizeChatId(triggeringChatId) || String(triggeringChatId || '').trim()
   if (norm) return isOwnerPrivateChat(ownerRef, norm) ? norm : ''
-  if (typeof routeOwner === 'function') {
-    const routed = normalizeChatId(routeOwner(''))
+  if (typeof resolveNoticeOwnerChat === 'function') {
+    const res = resolveNoticeOwnerChat({ purpose: 'notice' })
+    const raw = typeof res === 'string'
+      ? res
+      : (res && !res.blocked ? res.chatId : '')
+    const routed = raw ? normalizeChatId(raw) || String(raw).trim() : ''
     if (routed && isOwnerPrivateChat(ownerRef, routed)) return routed
   }
   return ''

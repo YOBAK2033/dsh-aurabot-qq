@@ -15,7 +15,7 @@ import { parseChatId } from '../gateway/address.js'
 
 const RING = 300
 
-export function createBridge({ ctx, getConfig, setConfig, hub, mods, identity, routeOwner, log, version, apiVersion, overview }) {
+export function createBridge({ ctx, getConfig, setConfig, hub, mods, identity, routeOwner, resolveOwnerRoute, log, version, apiVersion, overview }) {
   const events = [] // 最近发生的事（收到的消息、她发出去的话、模块发的事件），别的程序轮询用
   let seq = 0
   let disposed = false
@@ -39,7 +39,11 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, identity, r
     const ok = parsed.kind === 'group' ? cfg.allow?.groups : cfg.allow?.private
     return (ok || []).map(String).includes(parsed.id) ? '' : '不在白名单里，不能发'
   }
-  const ownerTarget = () => (typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || ''
+  const resolveOwner = () => {
+    if (typeof resolveOwnerRoute === 'function') return resolveOwnerRoute({ purpose: 'proactive' })
+    const cid = typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()
+    return cid ? { chatId: String(cid), blocked: false, reason: 'ok' } : { chatId: '', blocked: false, reason: 'no-route' }
+  }
 
   // ---------- 大家共用的几个操作 ----------
   const ops = {
@@ -54,8 +58,21 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, identity, r
     },
     /** 让她把一段话发出去（会拆条、可以带 <voice> <sticker:名字>）。target 不填 = 发给主人。 */
     send: async ({ target, text } = {}) => {
-      const t = target ? String(target) : ownerTarget()
-      if (!t) return { ok: false, message: '当前联系不上主人' }
+      let t = target ? String(target) : ''
+      if (!t) {
+        const route = resolveOwner()
+        if (!route || route.blocked || !route.chatId) {
+          return {
+            ok: false,
+            blocked: Boolean(route?.blocked),
+            reason: route?.reason || 'no-route',
+            message: route?.blocked
+              ? `主账号当前不可用（${route.reason}），已停止发送`
+              : '当前联系不上主人',
+          }
+        }
+        t = route.chatId
+      }
       const why = canSend(t)
       if (why) return { ok: false, message: why }
       if (!String(text || '').trim()) return { ok: false, message: '要说点什么' }

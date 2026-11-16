@@ -172,12 +172,20 @@ export function createMood({ getConfig, dsh, log }) {
 
 // ---------------- 主动搭话 ----------------
 
-export function createSpeakUp({ getConfig, hub, log, isMuted, memory, identity, routeOwner }) {
+export function createSpeakUp({ getConfig, hub, log, isMuted, memory, identity, routeOwner, resolveOwnerRoute }) {
   const file = () => dataDir('speakup.json')
   const load = () => readJson(file(), () => ({ day: '', count: 0, nextAt: 0, last: 0 }))
   const save = (s) => writeJson(file(), s)
   const ownerId = () => identity?.owner?.() || null
-  const resolveOwnerChat = () => (typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || null
+  const ownerRoute = () => {
+    if (typeof resolveOwnerRoute === 'function') return resolveOwnerRoute({ purpose: 'proactive' })
+    const cid = typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()
+    return cid ? { chatId: String(cid), blocked: false, reason: 'ok' } : { chatId: '', blocked: false, reason: 'no-route' }
+  }
+  const resolveOwnerChat = () => {
+    const r = ownerRoute()
+    return r && !r.blocked ? (String(r.chatId || '') || null) : null
+  }
   const ownerMuted = () => isOwnerChatMuted(identity, isMuted)
 
   // ---------------- 她的小闹钟 ----------------
@@ -371,8 +379,12 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory, identity, 
     const cfg = getConfig()
     const ownId = ownerId()
     if (!cfg.enabled || !cfg.speakUp.enabled || !ownId || ownerMuted() || memory?.()?.dislikes?.(ownId)) return
-    const targetChat = resolveOwnerChat()
-    if (!targetChat) { log.debug?.('主动搭话跳过：当前联系不上主人'); return }
+    const route = ownerRoute()
+    if (!route || route.blocked || !route.chatId) {
+      log.debug?.(`主动搭话跳过：${route?.blocked ? `主账号被阻塞（${route.reason}）` : '当前联系不上主人'}`)
+      return { ok: false, blocked: Boolean(route?.blocked), reason: route?.reason || 'no-route' }
+    }
+    const targetChat = String(route.chatId)
     const addr = parseChatId(targetChat)
     const followUp = !nudge ? memory?.()?.dueFollowUp?.(ownId) : null
     const owner = cfg.ownerName || '主人'
@@ -443,19 +455,24 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory, identity, 
     // 追问：她最后一句是在问主人、主人 15~40 分钟没回，有一半的机会轻轻追一句（每句最多追一次，不占每天的次数）
     const lb = hub.lastBotToOwner || { at: 0, text: '' }
     const quiet = Date.now() - lb.at
-    if (awake && c.nudge && lb.at > (hub.lastOwnerChatAt || 0) && lb.at !== s.nudgedFor && /[？?]|吗|呢|嘛|没$/.test(lb.text.trim()) && quiet > 15 * 60_000 && quiet < 40 * 60_000) {
-      s.nudgedFor = lb.at
-      save(s)
-      if (Math.random() < 0.5) await fire('追问', { nudge: true })
-      return
-    }
-    if (awake && idleOk && s.count < c.maxPerDay && Date.now() >= s.nextAt) {
-      s.count++
-      s.last = Date.now()
-      schedule(s, c)
-      save(s)
-      await fire()
-      return
+    const canOwnerNudge = awake && c.nudge && lb.at > (hub.lastOwnerChatAt || 0) && lb.at !== s.nudgedFor && /[？?]|吗|呢|嘛|没$/.test(lb.text.trim()) && quiet > 15 * 60_000 && quiet < 40 * 60_000
+    const canOwnerFire = awake && idleOk && s.count < c.maxPerDay && Date.now() >= s.nextAt
+    if (canOwnerNudge || canOwnerFire) {
+      const route = ownerRoute()
+      if (route && !route.blocked && route.chatId) {
+        if (canOwnerNudge) {
+          s.nudgedFor = lb.at
+          save(s)
+          if (Math.random() < 0.5) await fire('追问', { nudge: true })
+          return
+        }
+        s.count++
+        s.last = Date.now()
+        schedule(s, c)
+        save(s)
+        await fire()
+        return
+      }
     }
     if (!(await tickFriends(cfg, s))) save(s)
   }

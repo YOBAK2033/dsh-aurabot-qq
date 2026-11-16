@@ -43,7 +43,7 @@ export function digestOf(v, { subtitle = '', comments = [], vision = '' } = {}) 
   ].filter(Boolean).join('\n')
 }
 
-export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vision: see = lookWithVision, afterBrowse, groupShare, identity, routeOwner }) {
+export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vision: see = lookWithVision, afterBrowse, groupShare, identity, routeOwner, resolveOwnerRoute }) {
   const cfg = () => getConfig().bili
   const api = injected || createBiliApi({ getCookie: () => cfg().cookie, log })
   const shots = createShotStore({ max: () => getConfig().bili.shotLibrary })
@@ -57,7 +57,13 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
 
   const owner = () => getConfig().ownerName || '主人'
   const ownerId = () => identity?.owner?.() || null
-  const ownerChat = () => (typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || ''
+  const ownerChat = () => {
+    if (typeof resolveOwnerRoute === 'function') {
+      const r = resolveOwnerRoute({ purpose: 'proactive' })
+      return r && !r.blocked ? String(r.chatId || '') : ''
+    }
+    return (typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || ''
+  }
   // 能不能发评论 / 回复：Cookie 里要有 bili_jct，今天也没因为风控之类暂停
   const canPost = (s) => Boolean(parseCookie(cfg().cookie).bili_jct) && s.pauseDay !== dayKey()
   const pauseIf = (s, error) => {

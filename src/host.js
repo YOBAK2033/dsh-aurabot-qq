@@ -1175,7 +1175,7 @@ export function apply(ctx) {
     getConfig, setConfig,
   }
   mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS })
-  bridge = createBridge({ ctx, getConfig, setConfig, hub, mods, identity, routeOwner, log: logger.child('bridge'), version: VERSION, apiVersion: API_VERSION, overview: () => overview() })
+  bridge = createBridge({ ctx, getConfig, setConfig, hub, mods, identity, resolveOwnerRoute, routeOwner, log: logger.child('bridge'), version: VERSION, apiVersion: API_VERSION, overview: () => overview() })
   core.bridge = bridge
   core.modules = mods
 
@@ -1283,10 +1283,17 @@ export function apply(ctx) {
     // 只有明确 false（宿主自己的 GUI/CLI 会话）才放行给 DSH 自己的权限系统，别在异常时 fail-open。
     isOwnedSession: safeOwnedSession(typeof hub?.isOwnedSession === 'function' ? (sessionId) => hub.isOwnedSession(sessionId) : null),
     identity,
-    routeOwner,
+    resolveNoticeOwnerChat: () => resolveOwnerRoute({ purpose: 'notice' }),
   })
   core.dangerGuard = dangerGuard
-  approvalRelay = createApprovalRelay({ getConfig, deliver: (chatId, text) => hub.sendText(chatId, text), chatOfSession: (id) => hub.chatOfSession(id), identity, routeOwner, log })
+  approvalRelay = createApprovalRelay({
+    getConfig,
+    deliver: (chatId, text) => hub.sendText(chatId, text),
+    chatOfSession: (id) => hub.chatOfSession(id),
+    identity,
+    resolveNoticeOwnerChat: () => resolveOwnerRoute({ purpose: 'notice' }),
+    log,
+  })
   ctx.effect(() => {
     let off = null
     try { off = ctx.on('approval/request', (request, next) => approvalRelay.onRequest(request, next)) } catch (error) { log.debug('挂审批应答失败：', error.message) }

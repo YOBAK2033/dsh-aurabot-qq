@@ -22,11 +22,11 @@ export default {
   tab: 'bili',
   files: ['bili/duty.js', 'bili/group-share.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/danmaku.js', 'bili/login-pause.js', 'bili/qr-login.js'],
   setup(api) {
-    const { hub, identity, routeOwner } = api.core
+    const { hub, identity, routeOwner, resolveOwnerRoute } = api.core
     const lastImage = new Map() // chatId → 最近一张图的网址（给 bili_set_avatar 的 last 用）
     // 想发到群里的视频先攒成待批，主人在私聊里回「发 1」才真发
     const groupShare = createGroupShare({
-      getConfig: api.config, hub, identity, routeOwner, log: api.log,
+      getConfig: api.config, hub, identity, routeOwner, resolveOwnerRoute, log: api.log,
       // 截图库和「补一张」都在 createBili 里：用闭包延迟取，建完之后才真的被调用
       shotPathOf: (name) => bili.shotFileOf(name),
       captureShot: (bvid) => bili.captureShot(bvid),
@@ -40,7 +40,7 @@ export default {
     })
     const danmaku = createDanmaku(api)
     const bili = createBili({
-      getConfig: api.config, hub, identity, routeOwner, memory: api.lazy('memory'), log: api.log, dsh: api.dsh,
+      getConfig: api.config, hub, identity, routeOwner, resolveOwnerRoute, memory: api.lazy('memory'), log: api.log, dsh: api.dsh,
       afterBrowse: danmaku.afterBrowse, groupShare,
     })
     const gatewayIdle = () => {

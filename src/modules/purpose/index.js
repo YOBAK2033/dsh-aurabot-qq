@@ -48,6 +48,7 @@ export default {
       personaText: () => { try { return api.core.personas?.current?.() || '' } catch { return '' } },
       identity: api.core.identity,
       routeOwner: api.core.routeOwner,
+      resolveOwnerRoute: api.core.resolveOwnerRoute,
     })
     api.every(60_000, () => purpose.tick(), '目的引擎')
     api.route('/purpose/fire', async () => {
@@ -55,6 +56,8 @@ export default {
       const r = await purpose.fire('手动')
       if (!r) return { ok: false, message: '没有结果' }
       if (r.outcome === 'sent') return { ok: true, message: '已经去找你了' }
+      if (r.outcome === 'blocked') return { ok: false, blocked: true, reason: r.reason || '', message: `主账号当前不可用（${r.reason || 'blocked'}），已停止发送` }
+      if (r.outcome === 'no-route' || r.outcome === 'no-owner') return { ok: false, reason: r.reason || r.outcome, message: '当前联系不上主人' }
       if (r.outcome === 'silent') return { ok: true, message: '她这轮想了想，决定不说（不硬发）' }
       if (r.outcome === 'muted') return { ok: false, message: '主人在私聊里让她闭嘴了' }
       if (r.outcome === 'disabled') return { ok: false, message: '目的引擎开关是关的' }

@@ -65,11 +65,11 @@ export function parsePlan(raw) {
   return { action, items, groups }
 }
 
-export function createGroupShare({ getConfig, hub, identity = null, routeOwner = null, log = console, think: thinkInjected = null, groupNameOf, shotPathOf, captureShot } = {}) {
+export function createGroupShare({ getConfig, hub, identity = null, routeOwner = null, resolveOwnerRoute = null, log = console, think: thinkInjected = null, groupNameOf, shotPathOf, captureShot } = {}) {
   // 默认借她自己的后台会话写话/读话：人设、语气都现成，不用另外拼 prompt 风格
   const think = thinkInjected || (async (kind, prompt) => {
     if (!hub?.runSystemTurn) return ''
-    const title = kind === 'ask' ? 'QQ · 群分享问一句' : kind === 'receipt' ? 'QQ · 群分享回执' : 'QQ · 读懂回复'
+    const title = kind === 'ask' ? '群分享问一句' : kind === 'receipt' ? '群分享回执' : '读懂回复'
     // 用「主人私聊」那档预设：她本人在跟主人说话，不是群里的样子
     return String(await hub.runSystemTurn('bili-groupshare', title, prompt, { level: 'full', timeoutMs: 60_000, key: kind }))
   })
@@ -92,7 +92,15 @@ export function createGroupShare({ getConfig, hub, identity = null, routeOwner =
     chain = chain.then(task).catch((error) => log.warn('处理群分享出错：', error.message))
     return chain
   }
-  const ownerChat = () => (typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || ''
+  const ownerRoute = () => {
+    if (typeof resolveOwnerRoute === 'function') return resolveOwnerRoute({ purpose: 'proactive' })
+    const cid = typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()
+    return cid ? { chatId: String(cid), blocked: false, reason: 'ok' } : { chatId: '', blocked: false, reason: 'no-route' }
+  }
+  const ownerChat = () => {
+    const r = ownerRoute()
+    return r && !r.blocked ? String(r.chatId || '') : ''
+  }
 
   /** 默认群 + 额外授权群；没配额外群就只认 groupId。 */
   function allowedGroups() {
@@ -173,7 +181,15 @@ export function createGroupShare({ getConfig, hub, identity = null, routeOwner =
     if (!c.enabled || !String(c.groupId || '').trim()) return { ok: false, why: '群分享没开（没配群号）' }
     if (!g.enabled) return { ok: false, why: '总开关关着' }
     if (g.dryRun) return { ok: false, why: '试运行，不攒待批' }
-    if (!ownerChat()) return { ok: false, why: '当前联系不上主人' }
+    const r = ownerRoute()
+    if (!r || r.blocked || !r.chatId) {
+      return {
+        ok: false,
+        blocked: Boolean(r?.blocked),
+        reason: r?.reason || 'no-route',
+        why: r?.blocked ? `主账号当前不可用（${r.reason}），群分享审批已暂停` : '当前联系不上主人',
+      }
+    }
     const s = load()
     if (s.sentToday >= Number(c.dailyLimit)) return { ok: false, why: `今天已经发够 ${c.dailyLimit} 条了` }
     const have = pendingOf(s)

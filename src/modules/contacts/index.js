@@ -51,7 +51,15 @@ export default {
   platforms: ['qq'],
   description: '处理好友申请、加群申请和邀请，改私聊 / 群白名单；权限在「权限」页',
   setup(api) {
-    const { hub, onebot, identity, routeOwner } = api.core
+    const { hub, onebot, identity, routeOwner, resolveOwnerRoute } = api.core
+    const ownerTarget = () => {
+      if (typeof api.ownerChat === 'function') return api.ownerChat()
+      if (typeof resolveOwnerRoute === 'function') {
+        const r = resolveOwnerRoute({ purpose: 'proactive' })
+        return r && !r.blocked ? String(r.chatId || '') : ''
+      }
+      return String(routeOwner?.() || '')
+    }
     const qqCall = (action, params, opts) => (typeof api.native === 'function' ? api.native('qq', action, params, opts) : onebot.call(action, params, opts))
     const pendingFile = () => api.dataDir('friend-requests.json')
     const groupPendingFile = () => api.dataDir('group-requests.json')
@@ -98,9 +106,10 @@ export default {
       list.push(req)
       saveGroupPending(list)
       const cfg = api.config()
-      if ((cfg.profilePerms?.qqFriendRequest || 'owner') !== 'off' && (routeOwner?.() || hub?.ownerChat?.())) {
+      const to = ownerTarget()
+      if ((cfg.profilePerms?.qqFriendRequest || 'owner') !== 'off' && to) {
         const note = req.comment ? `，验证消息：「${req.comment}」` : ''
-        api.sendText(routeOwner?.() || hub?.ownerChat?.(), `${groupRequestText(req, cfg.botQQ)}${note}。可以让我列出待处理的加群申请并通过或拒绝。`).catch(() => {})
+        api.sendText(to, `${groupRequestText(req, cfg.botQQ)}${note}。可以让我列出待处理的加群申请并通过或拒绝。`).catch(() => {})
       }
     }
 
@@ -118,9 +127,10 @@ export default {
         savePending(list)
       }
       const cfg = api.config()
-      if (isNew && (cfg.profilePerms?.qqFriendRequest || 'owner') !== 'off' && (routeOwner?.() || hub?.ownerChat?.())) {
+      const to = ownerTarget()
+      if (isNew && (cfg.profilePerms?.qqFriendRequest || 'owner') !== 'off' && to) {
         const note = ev.comment ? `，验证消息：「${String(ev.comment).slice(0, 80)}」` : ''
-        api.sendText(routeOwner?.() || hub?.ownerChat?.(), `有人想加我好友：QQ ${userId}${note}。要通过就跟我说「通过 ${userId}」，不想加说「拒绝 ${userId}」。`).catch(() => {})
+        api.sendText(to, `有人想加我好友：QQ ${userId}${note}。要通过就跟我说「通过 ${userId}」，不想加说「拒绝 ${userId}」。`).catch(() => {})
       }
     })
 

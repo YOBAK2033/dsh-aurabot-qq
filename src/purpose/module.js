@@ -97,11 +97,19 @@ export function cleanReply(raw, options, cfg) {
   return s
 }
 
-export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, memory, personaText, pet: petOf, use, identity, routeOwner }) {
+export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, memory, personaText, pet: petOf, use, identity, routeOwner, resolveOwnerRoute }) {
   const moodOf = () => { try { return mood?.() || null } catch { return null } }
   const memoryOf = () => { try { return memory?.() || null } catch { return null } }
   const ownerId = () => identity?.owner?.() || null
-  const resolveOwnerChat = () => (typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()) || ''
+  const ownerRoute = () => {
+    if (typeof resolveOwnerRoute === 'function') return resolveOwnerRoute({ purpose: 'proactive' })
+    const cid = typeof routeOwner === 'function' ? routeOwner() : hub?.ownerChat?.()
+    return cid ? { chatId: String(cid), blocked: false, reason: 'ok' } : { chatId: '', blocked: false, reason: 'no-route' }
+  }
+  const resolveOwnerChat = () => {
+    const r = ownerRoute()
+    return r && !r.blocked ? String(r.chatId || '') : ''
+  }
   const ownerMuted = () => isOwnerChatMuted(identity, isMuted)
   // 下面的 friend 是主动搭话白名单里的对象，不传就是主人。朋友各有各的状态，素材只看和这个人的私聊、关于这个人的记忆。
   const chatIdOf = (cfg, friend) => (friend ? `private:${friend}` : resolveOwnerChat())
@@ -210,7 +218,7 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
       ...lines,
     ].join('\n')
     try {
-      const raw = await hub.runSystemTurn('purpose-score', 'QQ · 素材打分', prompt, {
+      const raw = await hub.runSystemTurn('purpose-score', '素材打分', prompt, {
         timeoutMs: 90000, noTools: true, key: 'score', model: sel,
       })
       const arr = parseScoreReply(raw)
@@ -365,7 +373,10 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
         log.warn?.('目的：桌宠气泡投递出错，结果不确定，不再重发：', error?.message)
         return 'failed'
       }
-      if (r && r.ok && r.via !== 'qq') hub.noteSaid?.(chatIdOf(getConfig()), text) // 气泡没法回，主人在 QQ 接话时她得知道说过什么
+      if (r && r.ok && r.via !== 'qq') {
+        const saidCid = chatIdOf(getConfig())
+        if (saidCid) hub.noteSaid?.(saidCid, text) // 气泡没法回，主人在私聊接话时她得知道说过什么
+      }
       if (r && r.ok) return 'sent' // dispatch 内部竞态回落 QQ 时也已发出，调用方不能再发
       if (r && r.reason === 'focus') return 'silent' // 专注模式开着：不发也不回落
       if (r && r.reason === 'pet-offline') return su.petFallbackToQQ ? 'qq' : 'silent' // 已确认尚未投递
@@ -378,6 +389,12 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
 
   // ---------- 生成 + 投递 + 回执（hub.deliver 内部吞错，成功判定看返回值） ----------
   async function runOnce({ reason = '定时', config, state, force = false, friend = '' } = {}) {
+    if (!friend) {
+      const r0 = ownerRoute()
+      if (!r0 || r0.blocked || !r0.chatId) {
+        return { outcome: r0?.blocked ? 'blocked' : 'no-route', reason: r0?.reason || 'no-route' }
+      }
+    }
     const cooldown = hub.systemSessionCooldown?.('purpose', { key: friend })
     if (cooldown) return { outcome: 'skipped-cooldown', retryAt: cooldown.retryAt }
     const cfg = getConfig()
@@ -426,7 +443,7 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     let genError = null
     try {
       log.info?.(`目的（${reason}）：${picked.purpose.text}`)
-      raw = await hub.runSystemTurn('purpose', 'QQ · 主动搭话（目的回合）', prompt, { timeoutMs: 180000, noTools: true, key: friend })
+      raw = await hub.runSystemTurn('purpose', '主动搭话（目的回合）', prompt, { timeoutMs: 180000, noTools: true, key: friend })
     } catch (error) {
       if (isSessionBackoff(error)) {
         // 查询与真正调用之间也可能进入冷却；这一轮没启动，不占次数或失败账。
@@ -728,15 +745,18 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     if (!/[？?]|吗|呢|嘛|没$/.test(String(lb.text || '').trim())) return false
     if (!(quietMs > 15 * MINUTE && quietMs < 40 * MINUTE)) return false
     if (hub.systemSessionCooldown?.('purpose-nudge')) return false
+    const nudgeRoute = ownerRoute()
+    if (!nudgeRoute || nudgeRoute.blocked || !nudgeRoute.chatId) return false
     writeJson(nudgeFile(), { nudgedFor: lb.at }) // 引擎状态文件会被 normalize 洗字段，追问标记单独存
     if (Math.random() >= 0.5) return true
     const idle = Math.round(quietMs / MINUTE)
     const owner = cfg.ownerName || '主人'
     const prompt = `【系统提醒，不是${owner}说的话】你刚才跟${owner}说「${String(lb.text || '').slice(-60)}」，${owner}已经 ${idle} 分钟没回了。可以轻轻追一句（比如「人呢」「睡着啦？」，或者换个话题），别催、别抱怨；觉得${owner}在忙就只回 ${SILENCE}。这一轮不能用工具，直接输出那句话。`
     try {
-      const raw = await hub.runSystemTurn('purpose-nudge', 'QQ · 主动搭话（追问）', prompt, { timeoutMs: 120000, noTools: true })
+      const raw = await hub.runSystemTurn('purpose-nudge', '主动搭话（追问）', prompt, { timeoutMs: 120000, noTools: true })
       const text = cleanReply(raw, { warn: (message) => log.warn?.(`目的：${message}`) }, getConfig())
-      if (text) await hub.deliver(chatIdOf(cfg), text, { userText: MOOD_PREFIX }) // 不带 own:true，同上：hub 桥接进下次对话
+      const to = resolveOwnerChat()
+      if (text && to) await hub.deliver(to, text, { userText: MOOD_PREFIX }) // 不带 own:true，同上：hub 桥接进下次对话
     } catch (error) {
       if (isSessionBackoff(error)) {
         writeJson(nudgeFile(), flag)
@@ -787,7 +807,8 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     const ownId = ownerId()
     if (!config.enabled || !ownId) return
     const ownerConfig = applyPersonaOverrides(config, personaOf(cfg))
-    if (resolveOwnerChat() && !ownerMuted() && !memoryOf()?.dislikes?.(ownId) && await tickOne(cfg, ownerConfig)) return
+    const ownerCheck = ownerRoute()
+    if (ownerCheck && !ownerCheck.blocked && ownerCheck.chatId && !ownerMuted() && !memoryOf()?.dislikes?.(ownId) && await tickOne(cfg, ownerConfig)) return
     for (const qq of cfg.speakUp?.allow || []) {
       const addr = parseChatId(qq) || parseChatId(`private:${qq}`)
       if (isOwner(identity, addr?.id || String(qq), addr?.platform || 'qq') || isMuted?.(chatIdOf(cfg, qq)) || memoryOf()?.dislikes?.(qq)) continue
@@ -801,7 +822,11 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     const config = applyPersonaOverrides(purposeConfig(cfg), personaOf(cfg))
     const ownId = ownerId()
     if (!config.enabled) return { outcome: 'disabled' }
-    if (!ownId || !resolveOwnerChat()) return { outcome: 'no-owner' }
+    if (!ownId) return { outcome: 'no-owner' }
+    const route = ownerRoute()
+    if (!route || route.blocked || !route.chatId) {
+      return { outcome: route?.blocked ? 'blocked' : 'no-route', reason: route?.reason || 'no-route' }
+    }
     if (ownerMuted()) return { outcome: 'muted' }
     if (memoryOf()?.dislikes?.(ownId)) return { outcome: 'disliked' }
     const state = loadState(config)

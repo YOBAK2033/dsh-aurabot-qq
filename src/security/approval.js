@@ -13,11 +13,13 @@ const REJECT_RE = /^(取消|拒绝)$/
  * @param {(chatId:string, text:string) => Promise<any>} o.deliver 发消息
  * @param {(sessionId:string) => string} o.chatOfSession DSH session → chatId
  * @param {object} [o.identity] 身份服务
- * @param {(platform?:string) => string|null} [o.routeOwner] 主人兜底路由
+ * @param {(platform?:string) => string|null} [o.routeOwner] 主人兜底路由（旧别名，兼容单测）
+ * @param {(opts?:{purpose?:string}) => (string|{chatId?:string,blocked?:boolean}|null)} [o.resolveNoticeOwnerChat] B 类通知解析器
  * @param {number} [o.timeoutMs] 等主人回复多久（默认 5 分钟）
  * @param {object} [o.log]
  */
-export function createApprovalRelay({ getConfig, deliver, chatOfSession, identity, routeOwner, timeoutMs = 5 * 60_000, log } = {}) {
+export function createApprovalRelay({ getConfig, deliver, chatOfSession, identity, resolveNoticeOwnerChat, routeOwner, timeoutMs = 5 * 60_000, log } = {}) {
+  const noticeResolver = resolveNoticeOwnerChat || routeOwner
   const queue = [] // 排队的请求：一次只问一条，「确认」只对正在问的这条生效
   let disposed = false
   let lastAsked = 0
@@ -25,7 +27,7 @@ export function createApprovalRelay({ getConfig, deliver, chatOfSession, identit
   const resolveTargetChat = (sessionId) => {
     const rawChat = sessionId ? chatOfSession?.(sessionId) : ''
     if (!rawChat) return ''
-    return resolveConfirmChat(identity, rawChat, routeOwner)
+    return resolveConfirmChat(identity, rawChat, noticeResolver)
   }
   const sendTo = (targetChat, text) => Promise.resolve().then(() => deliver(targetChat, text)).catch((error) => log?.warn?.('审批消息没发出去：', error.message))
 

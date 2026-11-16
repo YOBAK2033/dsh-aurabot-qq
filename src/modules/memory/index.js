@@ -38,7 +38,7 @@ export default {
   tab: 'memory',
   files: ['features/memory.js', 'features/memory-rules.js', 'features/memory-store.js', 'features/memory-vector.js'],
   setup(api, { fetchImpl } = {}) {
-    const { hub, http, identity, routeOwner } = api.core
+    const { hub, http, identity, routeOwner, resolveOwnerRoute } = api.core
     const memory = createMemoryStore({ dsh: api.dsh, getConfig: api.config, hub, log: api.log, fetchImpl, setConfig: api.setConfig, identity })
     memory.list('') // 启动时完成旧 JSON 迁移，不必等第一条聊天或打开面板。
 
@@ -141,7 +141,13 @@ export default {
       const q = String(http.query(req).q || '').trim()
       if (!q) return { ok: false, message: '给个查询词' }
       const owner = identity?.owner?.() || ''
-      const chatId = (typeof routeOwner === 'function' ? routeOwner() : '') || hub.ownerChat?.() || ''
+      const routed = typeof resolveOwnerRoute === 'function' ? resolveOwnerRoute({ purpose: 'proactive' }) : null
+      const defPlat = parseChatId('private:0')?.platform || ''
+      const defAcc = owner && defPlat ? identity?.accountOn?.(owner, defPlat) : ''
+      const chatId = (routed && !routed.blocked ? routed.chatId : '')
+        || (typeof api.ownerChat === 'function' ? api.ownerChat() : '')
+        || (typeof routeOwner === 'function' ? routeOwner() : '')
+        || (defAcc ? `private:${defAcc}` : '')
       let vec = []
       try { vec = await memory.vectorHits(q) } catch (error) {}
       // shown: false —— 预览不能算「真想起过」，否则你点几下预览就把记忆加深了、还乱涨 critical 计数

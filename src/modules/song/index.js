@@ -88,8 +88,26 @@ export default {
     // 面板里试唱：发到主人私聊
     api.route('/song/request', async (req) => {
       const b = await http.body(req)
-      const to = b.chatId || api.core.routeOwner?.() || hub.ownerChat?.() || ''
-      if (!to) return { ok: false, message: '当前联系不上主人' }
+      let to = String(b.chatId || '').trim()
+      if (!to) {
+        if (typeof api.core.resolveOwnerRoute === 'function') {
+          const route = api.core.resolveOwnerRoute({ purpose: 'proactive' })
+          if (!route || route.blocked || !route.chatId) {
+            return {
+              ok: false,
+              blocked: Boolean(route?.blocked),
+              reason: route?.reason || 'no-route',
+              message: route?.blocked
+                ? `主账号当前不可用（${route.reason}），已停止发送`
+                : '当前联系不上主人',
+            }
+          }
+          to = route.chatId
+        } else {
+          to = String(api.ownerChat?.() || api.core.routeOwner?.() || '').trim()
+          if (!to) return { ok: false, blocked: false, reason: 'no-route', message: '当前联系不上主人' }
+        }
+      }
       return song.request({ song: b.song, songId: b.songId, pitch: b.pitch, voice: b.voice, chatId: to })
     })
     return song

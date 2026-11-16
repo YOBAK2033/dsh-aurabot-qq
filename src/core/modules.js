@@ -1022,6 +1022,13 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       sendVoiceFile: writable('sendVoiceFile', (chatId, file, note) => governedSend(core, id, { chatId: String(chatId) }, () => core.hub.sendVoiceFile(String(chatId), file, note || `[${id}] 语音`), obLog)),
       platformOf: (chatId) => platformOf(chatId),
       caps: (chatId) => capsFor(chatId),
+      ownerChat: () => {
+        if (typeof core.resolveOwnerRoute === 'function') {
+          const route = core.resolveOwnerRoute({ purpose: 'proactive' })
+          return route && !route.blocked ? String(route.chatId || '') : ''
+        }
+        return typeof core.routeOwner === 'function' ? String(core.routeOwner() || '') : ''
+      },
       native: writable('native', (platform, action, params, opts) => nativeCall(rec, id, platform, action, params, opts)),
       // module: id —— 这次模型调用的用量记到哪个模块名下（面板「概览」的 token 明细）
       ask: writable('ask', (opts) => core.ask(typeof opts === 'string' ? { text: opts, module: id } : { ...opts, module: id })),
@@ -1040,7 +1047,25 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
         submit: writable('proactive.submit', (input = {}) => {
           const svc = core.outbound
           if (!svc || typeof svc.submit !== 'function') return { deliveryId: null, state: 'unsupported' }
-          return svc.submit({ ...(input || {}), moduleId: id })
+          const payload = { ...(input || {}), moduleId: id }
+          const tier = typeof svc.status === 'function' ? svc.status()?.tier : null
+          if (tier && tier !== 'broker') return svc.submit(payload)
+          if (!String(payload.to || '').trim()) {
+            if (typeof core.resolveOwnerRoute === 'function') {
+              const route = core.resolveOwnerRoute({ purpose: 'proactive' })
+              if (!route || route.blocked || !route.chatId) {
+                return { deliveryId: null, state: 'dropped', reason: route?.reason || 'no-route' }
+              }
+              payload.to = route.chatId
+            } else if (typeof core.routeOwner === 'function') {
+              const cid = String(core.routeOwner() || '').trim()
+              if (!cid) return { deliveryId: null, state: 'dropped', reason: 'no-route' }
+              payload.to = cid
+            } else {
+              return { deliveryId: null, state: 'dropped', reason: 'no-route' }
+            }
+          }
+          return svc.submit(payload)
         }),
         statusOf: writable('proactive.statusOf', (deliveryId) => {
           const svc = core.outbound
