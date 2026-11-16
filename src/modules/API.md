@@ -122,7 +122,8 @@ export default {
 | `api.sendParts(chatId, parts, opts?)` | **推荐**：发跨平台标准化 `Part[]` 消息段（`text`、`image`、`voice`、`video`、`file`、`mention`、`reply`……），自动走网关降级与出站策略 |
 | `api.platformOf(chatId)` | 从 `chatId` 解析所属平台（如 `'qq'`、`'feishu'`），无法识别返回 `''` |
 | `api.caps(chatId)` | 查询该聊天所在平台实例的当前能力表（`Caps`），未就绪返回 `null` |
-| `api.ownerChat()` | 解析主人当前主动消息目标 `chatId`（命中主账号策略；被阻塞或无可用通道返回 `''`，不再静默串发 QQ） |
+| `api.ownerRoute({ purpose? })` | 查询主人主账号路由的结构化结果 `{ chatId, blocked, reason, target, fallbackUsed }`；受阻或无路由时 `chatId` 为 `''` 且不会静默回退 QQ |
+| `api.ownerChat()` | `api.ownerRoute().chatId` 的快捷方式：返回主人当前主动消息目标 `chatId`，受阻或无可用通道返回 `''` |
 | `api.proactive.submit({ text, to?, itemId?, cause? })` | **仅支持 `broker` 档**：`broker` 档省略 `to` 时自动解析主人主账号目标，主账号受阻或不可达返回 `{ deliveryId: null, state: 'dropped', reason }`；`pass` / `gate` 档不解析主账号并直接返回 `{ deliveryId: null, state: 'unsupported' }`（非 `broker` 档请改用 `api.ownerChat()` + `api.sendParts` / `api.sendText`） |
 | `api.native(platform, action, params?, opts?)` | 调用指定平台的原生动作；**必须在模块 `platforms` 里显式声明该平台**（`['*']` 不放行） |
 | `api.sendSegments(chatId, [OneBot 消息段], 日志备注)` | *(已弃用，仅 QQ 兼容)* 发 OneBot 消息段；未开启 QQ、模块未声明 `'qq'` 或传入非 QQ `chatId` 会直接报错，请改用 `api.sendParts` |

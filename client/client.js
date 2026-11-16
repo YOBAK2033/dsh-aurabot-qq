@@ -1388,6 +1388,27 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     const PLATFORM_NAMES = { qq: 'QQ', feishu: '飞书', qqbot: 'QQ 官方机器人', bridge: '通用桥' }
     const platformLabel = (name) => PLATFORM_NAMES[name] || name || '平台'
+    const ownerTargetText = (t) => {
+      if (!t) return ''
+      const pLabel = platformLabel(t.platform)
+      const instPart = t.instance && t.instance !== t.platform ? `（${t.instance}）` : ''
+      const accPart = t.account ? ` · ${t.account}` : ''
+      return pLabel + instPart + accPart
+    }
+    const ownerPrimaryLabel = (pref) => {
+      const p = pref || {}
+      if (p.mode === 'recent') return '跟随最近私聊平台（recent）'
+      if (!p.platform && !p.instance) return '未单独指定（默认优先 QQ）'
+      const basePlat = p.platform || String(p.instance || '').split('#')[0]
+      return ownerTargetText({ platform: basePlat, instance: p.instance || basePlat, account: p.account })
+    }
+    const isOwnerOptionSelected = (pref, o) => Boolean(
+      pref && o
+      && pref.mode !== 'recent'
+      && pref.platform === o.platform
+      && (o.multiInstance ? pref.instance === o.instance : (!pref.instance || pref.instance === o.instance))
+      && (!pref.account || pref.account === o.account)
+    )
 
     const TOOL_STATUS = { ready: '已就绪', missing: '未找到', invalid: '不可用' }
     const TOOL_SOURCE = { auto: '自动检测', legacy: '旧 B 站设置', config: '手动指定', managed: '托管安装' }
@@ -1673,6 +1694,25 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         toast(r.message || (r.ok ? '已更新' : '没成功'), r.ok ? 'ok' : 'err')
         if (r.ok) loadPeople()
       }
+      const setPrimary = async (patch) => {
+        setBusy('owner-primary')
+        try {
+          const r = await post('/platforms/owner/primary', patch)
+          toast(r.message || (r.ok ? '已更新主账号' : '没成功'), r.ok ? 'ok' : 'err')
+          if (r.ok) {
+            setPeopleData((cur) => cur ? {
+              ...cur,
+              ownerPrimary: r.ownerPrimary,
+              ownerAccountOptions: r.ownerAccountOptions || cur.ownerAccountOptions,
+              resolvedProactiveRoute: r.resolvedProactiveRoute,
+              resolvedNoticeRoute: r.resolvedNoticeRoute,
+              lastBlockedRoute: r.lastBlockedRoute,
+            } : cur)
+            loadPeople()
+            reload()
+          }
+        } finally { setBusy('') }
+      }
       const previewImport = async () => {
         if (!importPath.trim()) return toast('先填 QQ 版数据目录', 'err')
         setImportBusy(true)
@@ -1737,21 +1777,44 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             }, '移除平台') : null),
         )) : h(Card, { title: '还没有平台' }, h(Empty, { icon: '📡', text: '在「QQ 网关」里先接上一个平台；接好后这里会出现卡片。' })),
         h(Card, { title: '人', desc: '每个人可以挂多个平台账号。合并前先预览；解绑只解除这个平台账号，不删记忆。' },
-          people.length ? people.map((p) => h('div', { key: p.person, style: { padding: '8px 0', borderBottom: '1px solid var(--ab-line)' } },
-            h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
-              h('b', null, p.name || '(未命名)'),
-              h('span', { className: 'ab-small ab-muted' }, p.person),
-              p.owner ? h('span', { className: 'ab-badge' }, '主人') : null,
-              h('span', { className: 'ab-small ab-muted' }, '固定平台：'),
-              h('select', { className: 'ab-select', value: p.fixed || '', onChange: (e) => fix(p.person, e.target.value) },
-                h('option', { value: '' }, '跟随最近'),
-                [...new Set(people.flatMap((x) => x.accounts.map((a) => a.platform)))].sort().map((pl) => h('option', { key: pl, value: pl }, platformLabel(pl))))),
-            h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6, marginTop: 6 } },
-              (p.accounts || []).length ? p.accounts.map((a) => h('span', { key: a.platform + ':' + a.account, className: 'ab-badge mine' },
-                platformLabel(a.platform) + '：' + a.account,
-                h('button', { type: 'button', title: '解绑', style: { marginLeft: 6, border: 0, background: 'none', cursor: 'pointer' }, onClick: () => unlink(a) }, '×'))) :
-                h('span', { className: 'ab-small ab-muted' }, '还没有账号')),
-          )) : h('div', { className: 'ab-small ab-muted' }, '记忆里还没有人物。'),
+          people.length ? people.map((p) => {
+            const curPref = (peopleData && peopleData.ownerPrimary) || draft.ownerPrimary || {}
+            const ownerOpts = (peopleData && peopleData.ownerAccountOptions) || []
+            return h('div', { key: p.person, style: { padding: '8px 0', borderBottom: '1px solid var(--ab-line)' } },
+              h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+                h('b', null, p.name || '(未命名)'),
+                h('span', { className: 'ab-small ab-muted' }, p.person),
+                p.owner ? h('span', { className: 'ab-badge' }, '主人') : null,
+                p.owner ? h(Fragment, null,
+                  h('span', { className: 'ab-badge mine' }, '当前主账号：' + ownerPrimaryLabel(curPref)),
+                  go ? h(Btn, { small: true, kind: 'ghost', onClick: () => go('access') }, '去权限页设置') : null,
+                ) : h(Fragment, null,
+                  h('span', { className: 'ab-small ab-muted' }, '固定平台：'),
+                  h('select', { className: 'ab-select', value: p.fixed || '', onChange: (e) => fix(p.person, e.target.value) },
+                    h('option', { value: '' }, '跟随最近'),
+                    [...new Set(people.flatMap((x) => x.accounts.map((a) => a.platform)))].sort().map((pl) => h('option', { key: pl, value: pl }, platformLabel(pl)))),
+                )),
+              h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6, marginTop: 6 } },
+                (p.accounts || []).length ? p.accounts.map((a) => {
+                  const accOpts = p.owner ? ownerOpts.filter((o) => o.platform === a.platform && String(o.account) === String(a.account)) : []
+                  return h('span', { key: a.platform + ':' + a.account, className: 'ab-flex', style: { gap: 4, alignItems: 'center' } },
+                    h('span', { className: 'ab-badge mine' },
+                      platformLabel(a.platform) + '：' + a.account,
+                      h('button', { type: 'button', title: '解绑', style: { marginLeft: 6, border: 0, background: 'none', cursor: 'pointer' }, onClick: () => unlink(a) }, '×')),
+                    accOpts.map((o) => {
+                      const isCurrent = isOwnerOptionSelected(curPref, o)
+                      return h(Btn, {
+                        key: o.key,
+                        small: true,
+                        kind: isCurrent ? 'ghost' : undefined,
+                        disabled: busy === 'owner-primary' || !o.canProactive || isCurrent,
+                        title: !o.canProactive ? '仅支持回复，无法设为主账号' : (isCurrent ? '已经是当前主账号' : '将该账号设为主账号'),
+                        onClick: () => setPrimary({ mode: 'fixed', platform: o.platform, instance: o.instance, account: o.account }),
+                      }, isCurrent ? '当前主账号' : (!o.canProactive ? '仅支持回复' : (o.multiInstance ? `设为 ${o.instance} 主账号` : '设为主账号')))
+                    }))
+                }) : h('span', { className: 'ab-small ab-muted' }, '还没有账号')),
+            )
+          }) : h('div', { className: 'ab-small ab-muted' }, '记忆里还没有人物。'),
           h('div', { className: 'ab-muted ab-small', style: { marginTop: 10 } }, '合并两个人（先预览，再确认）：'),
           h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6, marginTop: 6 } },
             h('select', { className: 'ab-select', value: mergeFrom, onChange: (e) => setMergeFrom(e.target.value) },
@@ -2347,8 +2410,114 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     function GlobalAccess({ st, draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
+      const [peopleInfo, setPeopleInfo] = useState(null)
+      const [testSending, setTestSending] = useState(false)
+      const [testResult, setTestResult] = useState(null)
+      const refreshPeople = () => get('/platforms/people').then((r) => { if (r && r.ok !== false) setPeopleInfo(r) }).catch(() => {})
+      const primaryKey = JSON.stringify(st && st.config ? st.config.ownerPrimary : null)
+      const platformsKey = JSON.stringify(st && st.config ? st.config.platforms : null)
+      const onebotState = st && st.onebot ? st.onebot.state : ''
+      useEffect(() => { refreshPeople() }, [primaryKey, platformsKey, onebotState])
+
+      const pref = draft.ownerPrimary || { mode: 'fixed', platform: '', instance: '', account: '', fallback: false, noticeFallback: true }
+      const options = (peopleInfo && peopleInfo.ownerAccountOptions) || []
+      const optValue = (o) => 'account:' + o.platform + ':' + o.instance + ':' + o.account
+      const matchedOpt = pref.mode === 'recent' || (!pref.platform && !pref.instance)
+        ? null
+        : options.find((o) => isOwnerOptionSelected(pref, o))
+      const selectValue = pref.mode === 'recent'
+        ? '__recent__'
+        : (!pref.platform && !pref.instance)
+          ? '__default__'
+          : matchedOpt
+            ? optValue(matchedOpt)
+            : '__orphan__'
+
+      const onSelectPrimary = (val) => {
+        if (val === '__default__') {
+          setDraft(setPath(draft, 'ownerPrimary', { ...pref, mode: 'fixed', platform: '', instance: '', account: '' }))
+        } else if (val === '__recent__') {
+          setDraft(setPath(draft, 'ownerPrimary', { ...pref, mode: 'recent', platform: '', instance: '', account: '' }))
+        } else if (val.startsWith('account:')) {
+          const hit = options.find((o) => optValue(o) === val)
+          if (hit) setDraft(setPath(draft, 'ownerPrimary', { ...pref, mode: 'fixed', platform: hit.platform, instance: hit.instance, account: hit.account }))
+        }
+      }
+
+      const formatOptLabel = (o) => {
+        const instPart = (o.multiInstance || (o.instance && o.instance !== o.platform)) ? ` · ${o.instance}` : ''
+        const statusPart = !o.canProactive
+          ? '（仅支持回复，无法设为主账号）'
+          : !o.enabled
+            ? '（已停用）'
+            : o.state === 'connected'
+              ? '（在线）'
+              : o.state === 'connecting'
+                ? '（连接中）'
+                : '（未连接）'
+        return platformLabel(o.platform) + instPart + ' · ' + o.account + statusPart
+      }
+
+      const proRoute = peopleInfo && peopleInfo.resolvedProactiveRoute
+      const noticeRoute = peopleInfo && peopleInfo.resolvedNoticeRoute
+      const lastBlocked = peopleInfo && peopleInfo.lastBlockedRoute
+      const hasUnsavedPrimary = Boolean(st && st.config && JSON.stringify(pref) !== JSON.stringify(st.config.ownerPrimary))
+      const routeStatusNode = (() => {
+        if (!proRoute) return null
+        if (proRoute.blocked) {
+          const targetDesc = ownerTargetText(proRoute.target) || ownerPrimaryLabel(pref)
+          const reasonMap = {
+            'primary-unlinked': `当前主账号（${targetDesc}）已从主人名下解绑，请重新选择主账号`,
+            'primary-proactive-none': `当前主账号（${targetDesc}）实例仅支持回复，无法发送主动消息`,
+            'primary-offline': `当前主账号（${targetDesc}）未连接，普通主动消息已暂停发送`,
+          }
+          const noticeDesc = (pref.noticeFallback !== false && noticeRoute && !noticeRoute.blocked)
+            ? '；系统重要通知仍允许回退其他在线平台'
+            : '；系统重要通知同样已关闭回退'
+          return h('div', { className: cx('ab-note', (pref.noticeFallback !== false && noticeRoute && !noticeRoute.blocked) ? 'warn' : 'err'), style: { width: '100%' } },
+            (reasonMap[proRoute.reason] || `当前主账号（${targetDesc}）不可用（${proRoute.reason}），普通主动消息已暂停发送`) + noticeDesc)
+        }
+        if (proRoute.chatId) {
+          const desc = ownerTargetText(proRoute.target) || proRoute.chatId
+          if (proRoute.fallbackUsed) {
+            return h('div', { className: 'ab-note warn', style: { width: '100%' } }, '主账号当前不可用，已按回退策略路由至：' + desc)
+          }
+          return h('div', { className: 'ab-small ab-muted', style: { width: '100%' } },
+            '当前主动消息将发往：' + desc + (lastBlocked ? `（最近曾阻塞：${lastBlocked.reason}）` : ''))
+        }
+        return h('div', { className: 'ab-note warn', style: { width: '100%' } },
+          proRoute.reason === 'no-owner' ? '尚未认领主人身份，当前无法发送主动消息' : '当前没有可用的在线平台可发送主动消息')
+      })()
+
+      const testSend = async () => {
+        setTestSending(true)
+        try {
+          const r = await post('/test-send')
+          setTestResult(r)
+          toast(r.message || (r.ok ? '已发送' : '没发出去'), r.ok ? 'ok' : 'err')
+          refreshPeople()
+        } finally { setTestSending(false) }
+      }
+
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '主人', desc: '主人的 QQ 号。群管、点歌、电脑上的操作只听主人的。' },
+        h(Card, { title: '主人', desc: '主人的 QQ 号与主动消息接收账号。群管、点歌、电脑上的操作只听主人的。' },
+          h(Row, { label: '大肥鱼的主账号（主动消息接收账号）', hint: '指定 ta 主动私聊找你、汇报结果或自测提醒时发往哪一个平台账号；不影响你在当前会话里和 ta 聊天时的原地回复。' },
+            h('div', { style: { width: '100%', display: 'flex', flexDirection: 'column', gap: 6 } },
+              h('div', { className: 'ab-flex', style: { gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+                h('select', { className: 'ab-select', 'aria-label': '大肥鱼的主账号', value: selectValue, onChange: (e) => onSelectPrimary(e.target.value) },
+                  h('option', { value: '__default__' }, '未单独指定（默认优先 QQ）'),
+                  h('option', { value: '__recent__' }, '跟随最近私聊平台（recent）'),
+                  options.map((o) => h('option', { key: o.key, value: optValue(o), disabled: !o.canProactive }, formatOptLabel(o))),
+                  selectValue === '__orphan__' ? h('option', { value: '__orphan__' }, ownerPrimaryLabel(pref) + '（当前配置，待刷新或已解绑）') : null),
+                h(Btn, { small: true, disabled: testSending, onClick: testSend }, testSending ? '发送中…' : '测试发送给主账号'),
+              ),
+              hasUnsavedPrimary ? h('div', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, '有未保存的主账号改动，请点击底部「保存设置」后再生效/测试。') : null,
+              routeStatusNode,
+              testResult ? h('div', { className: cx('ab-note', testResult.ok ? '' : (testResult.blocked ? 'warn' : 'err')), style: { width: '100%' } },
+                (testResult.message || '') + (testResult.fallbackUsed ? '（本次通过回退平台发出）' : '')) : null,
+            )),
+          h(Row, { label: '主账号不可用时，允许普通主动聊天改发其他在线平台', hint: '默认关闭。关闭时若主账号离线或未绑定，ta 会暂停主动搭话、汇报等普通主动消息，绝不串发到其他平台。' }, f.sw('ownerPrimary.fallback')),
+          h(Row, { label: '主账号不可用时，允许系统重要通知与自测提醒改发其他在线平台（不含无会话危险操作）', hint: '默认开启。仅影响系统提醒与「测试发送给主账号」；无归属会话的危险操作与授权仍按原地 fail-closed 处理。' }, f.sw('ownerPrimary.noticeFallback')),
           h(Row, { label: '主人 QQ 号' }, f.text('ownerQQ')),
           h(Row, { label: 'ta怎么称呼你' }, f.text('ownerName', { placeholder: '主人' })),
           h(Row, { label: '主人私聊的权限', hint: '群聊永远没有电脑操作权限，这里管不到群。' },
@@ -9456,7 +9625,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         stickers: Stickers, imagegen: ImageGen, diary: Diary, speakup: SpeakUp, autotelic: Autotelic, pet: PetPanel, mood: Mood, memory: MemoryPage, persona: PersonaMemory, song: Song, bili: Bili, douyin: Douyin, heybox: Heybox, local: LocalApi, browser: Browser, security: Security, market: Market, modules: Modules, logs: Logs, about: About, backup: Backup,
       }[curTab.id] || Overview
       // 哪些标签有没保存的改动
-      const TAB_KEYS = { platforms: ['platforms'], tools: [], connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'approvalNotify', 'approvalViaQQ', 'qqApi', 'longTasks', 'profilePerms', 'subagentBackground'], group: ['group', 'merge', 'titleFilter', 'chat'], model: ['model', 'chatModels'], voice: ['voice'], asr: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], diary: ['diary', 'qzoneSocial'], speakup: ['speakUp'], autotelic: [], pet: [], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], douyin: ['douyin'], heybox: ['heybox'], local: ['local'], browser: ['browser'], security: ['security', 'update'] }
+      const TAB_KEYS = { platforms: ['platforms'], tools: [], connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'ownerPrimary', 'approvalNotify', 'approvalViaQQ', 'qqApi', 'longTasks', 'profilePerms', 'subagentBackground'], group: ['group', 'merge', 'titleFilter', 'chat'], model: ['model', 'chatModels'], voice: ['voice'], asr: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], diary: ['diary', 'qzoneSocial'], speakup: ['speakUp'], autotelic: [], pet: [], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], douyin: ['douyin'], heybox: ['heybox'], local: ['local'], browser: ['browser'], security: ['security', 'update'] }
       const tabDirty = (id) => {
         if (!dirty) return false
         if (id.startsWith('ext:')) { const k = id.slice(4); return JSON.stringify((draft.ext || {})[k]) !== JSON.stringify((cfg.ext || {})[k]) }

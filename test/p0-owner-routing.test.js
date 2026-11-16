@@ -179,15 +179,21 @@ test('P0-3：宿主 /platforms/people 与 /platforms/people/fixed 正常读写 r
   const ownerPerson = claimJson.person
   assert.ok(ownerPerson)
 
-  // /platforms/people/fixed 写 + /platforms/people 读
-  const fixRes = await fake.call('/platforms/people/fixed', { person: ownerPerson, platform: 'bridge' })
+  // /platforms/people/fixed 仅服务非主人：对主人调用应返回明确提示；对非主人成员读写 routing 正常
+  const ownerFixRes = await fake.call('/platforms/people/fixed', { person: ownerPerson, platform: 'bridge' })
+  assert.equal(ownerFixRes.json().ok, false)
+  assert.match(ownerFixRes.json().message, /权限/)
+
+  const guestPerson = api.gateway.identity.resolve('bridge', 'guest_1')
+  api.memory.add({ text: '路人朋友测试', about: guestPerson, aboutName: '路人', source: 'panel' })
+  const fixRes = await fake.call('/platforms/people/fixed', { person: guestPerson, platform: 'bridge' })
   assert.equal(fixRes.json().ok, true, fixRes.json().message)
 
   const peopleRes = await fake.call('/platforms/people')
   const peopleJson = peopleRes.json()
   assert.equal(peopleJson.ok, true)
-  const ownerRow = peopleJson.list.find((x) => x.person === ownerPerson)
-  assert.equal(ownerRow?.fixed, 'bridge')
+  const guestRow = peopleJson.list.find((x) => x.person === guestPerson)
+  assert.equal(guestRow?.fixed, 'bridge')
 
   // 通过 bridge /hello 声明 proactive='free'，验证宿主 routeOwner() 正确解析 gateway.routeTo() 字符串返回值
   const helloRoute = fake.routes.get('/platform/bridge/hello')
@@ -212,8 +218,8 @@ test('P0-3：宿主 /platforms/people 与 /platforms/people/fixed 正常读写 r
   assert.equal(api.hub.ownerChat(), 'bridge:private:b_owner')
 
   // 取消固定平台也能正常清空
-  const unfixRes = await fake.call('/platforms/people/fixed', { person: ownerPerson, platform: '' })
+  const unfixRes = await fake.call('/platforms/people/fixed', { person: guestPerson, platform: '' })
   assert.equal(unfixRes.json().ok, true)
   const peopleAfter = (await fake.call('/platforms/people')).json()
-  assert.equal(peopleAfter.list.find((x) => x.person === ownerPerson)?.fixed, '')
+  assert.equal(peopleAfter.list.find((x) => x.person === guestPerson)?.fixed, '')
 })

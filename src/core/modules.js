@@ -842,6 +842,20 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   function makeApi(id, source, rec) {
     const mlog = logger.child(id)
     const active = () => !disposed && !rec.stopped && live.get(id) === rec
+    const readOwnerRoute = ({ purpose = 'proactive' } = {}) => {
+      if (typeof core.resolveOwnerRoute === 'function') {
+        const route = core.resolveOwnerRoute({ purpose })
+        return {
+          chatId: route && !route.blocked ? String(route.chatId || '') : '',
+          blocked: Boolean(route?.blocked),
+          reason: String(route?.reason || (route?.blocked ? 'blocked' : 'no-route')),
+          target: route?.target ?? null,
+          fallbackUsed: Boolean(route?.fallbackUsed),
+        }
+      }
+      const chatId = typeof core.routeOwner === 'function' ? String(core.routeOwner() || '') : ''
+      return { chatId, blocked: false, reason: chatId ? 'legacy' : 'no-route', target: null, fallbackUsed: false }
+    }
     const writable = (label, fn) => (...args) => {
       if (!active()) {
         const error = new Error(`模块「${id}」已停止，不能调用 ${label}`)
@@ -1022,13 +1036,8 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       sendVoiceFile: writable('sendVoiceFile', (chatId, file, note) => governedSend(core, id, { chatId: String(chatId) }, () => core.hub.sendVoiceFile(String(chatId), file, note || `[${id}] 语音`), obLog)),
       platformOf: (chatId) => platformOf(chatId),
       caps: (chatId) => capsFor(chatId),
-      ownerChat: () => {
-        if (typeof core.resolveOwnerRoute === 'function') {
-          const route = core.resolveOwnerRoute({ purpose: 'proactive' })
-          return route && !route.blocked ? String(route.chatId || '') : ''
-        }
-        return typeof core.routeOwner === 'function' ? String(core.routeOwner() || '') : ''
-      },
+      ownerRoute: (opts) => readOwnerRoute(opts),
+      ownerChat: () => readOwnerRoute({ purpose: 'proactive' }).chatId,
       native: writable('native', (platform, action, params, opts) => nativeCall(rec, id, platform, action, params, opts)),
       // module: id —— 这次模型调用的用量记到哪个模块名下（面板「概览」的 token 明细）
       ask: writable('ask', (opts) => core.ask(typeof opts === 'string' ? { text: opts, module: id } : { ...opts, module: id })),

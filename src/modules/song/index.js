@@ -90,14 +90,16 @@ export default {
       const b = await http.body(req)
       let to = String(b.chatId || '').trim()
       if (!to) {
-        if (typeof api.core.resolveOwnerRoute === 'function') {
-          const route = api.core.resolveOwnerRoute({ purpose: 'proactive' })
-          if (!route || route.blocked || !route.chatId) {
+        const route = typeof api.core.resolveOwnerRoute === 'function'
+          ? api.core.resolveOwnerRoute({ purpose: 'proactive' })
+          : (typeof api.ownerRoute === 'function' ? api.ownerRoute({ purpose: 'proactive' }) : null)
+        if (route) {
+          if (route.blocked || !route.chatId) {
             return {
               ok: false,
-              blocked: Boolean(route?.blocked),
-              reason: route?.reason || 'no-route',
-              message: route?.blocked
+              blocked: Boolean(route.blocked),
+              reason: route.reason || 'no-route',
+              message: route.blocked
                 ? `主账号当前不可用（${route.reason}），已停止发送`
                 : '当前联系不上主人',
             }
