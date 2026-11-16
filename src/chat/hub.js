@@ -101,7 +101,8 @@ export function reallySent (r) {
   return Boolean(r) && r.message_id !== undefined && !String(r.message_id).startsWith('sim-')
 }
 
-export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onMemoryCommand, onCommand, isMuted, dislikes, random = Math.random, moodEffects, localApi, hooks, availableModels, toolsGeneration, capabilitiesOf, gateway = null, identity = null, handover = null, platformLabel: platformLabelInjected = null, routeOwner: routeOwnerInjected = null, resolveOwnerRoute: resolveOwnerRouteInjected = null }) {
+export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onMemoryCommand, onCommand, isMuted, dislikes, random = Math.random, moodEffects, localApi, hooks, availableModels, toolsGeneration, capabilitiesOf, gateway: initialGateway = null, identity = null, handover = null, platformLabel: platformLabelInjected = null, routeOwner: routeOwnerInjected = null, resolveOwnerRoute: resolveOwnerRouteInjected = null }) {
+  let gateway = initialGateway
   const ownerRef = () => identity
   const ownerId = () => identity?.owner?.() || null
   const defaultPlatform = () => parseChatId('private:0')?.platform || ''
@@ -4504,5 +4505,6 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     get lastBotToOwner() { return lastBotToOwner },
     get selfId() { return selfId },
     groupNames,
+    setGateway: (gw) => { gateway = gw || null },
   }
 }

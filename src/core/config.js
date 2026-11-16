@@ -19,6 +19,7 @@ export const DEFAULTS = {
   communityMigrated: {}, // 搬到社区库的模块处理过没有（id → installed / skipped / kept），只处理一次
   botQQ: '', // 机器人 QQ 号（向导里填）
   ownerQQ: '', // 主人 QQ 号（向导里填）
+  ownerPersonId: '', // 只读系统字段：身份库认领的主人 PersonId（由宿主同步，面板不可改）
   ownerName: '主人',
   ownerLevel: 'full', // full | social | chat
   ownerPrimary: {
@@ -552,6 +553,7 @@ export function normalize(raw) {  const c = deepMerge(DEFAULTS, raw)
   c.conversationContext = { enabled: bool(c.conversationContext?.enabled, false) }
   c.botQQ = qq(c.botQQ)
   c.ownerQQ = qq(c.ownerQQ)
+  c.ownerPersonId = typeof c.ownerPersonId === 'string' || typeof c.ownerPersonId === 'number' ? String(c.ownerPersonId).trim() : ''
   c.approvalNotify = bool(c.approvalNotify, true)
   // 老配置只有 approvalNotify：没写过 notice 时用它当审批上报的默认值，免得更一次版本被重新打开
   c.notice = normalizeNotice(isObj(raw?.notice) ? raw.notice : null, raw?.approvalNotify)
@@ -1141,19 +1143,52 @@ export function loadConfig() {
   return normalize(raw)
 }
 
+const AUTH_UUID_RE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u
+
+export function authOwnerKey(cfg) {
+  return String(cfg?.ownerPersonId || cfg?.ownerQQ || '').trim()
+}
+
 export function ownerAuthorizationRevision(cfg) {
-  const binding = cfg.ownerAuthorization
-  return cfg.ownerQQ && binding?.owner === cfg.ownerQQ && typeof binding.revision === 'string'
-    && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(binding.revision) ? binding.revision : ''
+  const key = authOwnerKey(cfg)
+  const binding = cfg?.ownerAuthorization
+  return key && binding?.owner === key && typeof binding.revision === 'string'
+    && AUTH_UUID_RE.test(binding.revision) ? binding.revision : ''
 }
 
 export function saveConfig(cfg, previous = loadConfig()) {
   const c = normalize(cfg)
+  const prev = isObj(previous) ? previous : {}
+  const key = authOwnerKey(c)
   // Only the previous authoritative configuration can carry an authorization forward.
-  if (c.ownerQQ) {
-    const revision = c.ownerQQ === previous.ownerQQ ? ownerAuthorizationRevision(previous) : ''
-    c.ownerAuthorization = { owner: c.ownerQQ, revision: revision || randomUUID() }
-  } else delete c.ownerAuthorization
+  if (key) {
+    const prevPersonId = typeof prev.ownerPersonId === 'string' || typeof prev.ownerPersonId === 'number'
+      ? String(prev.ownerPersonId).trim()
+      : ''
+    const prevQQ = qq(prev.ownerQQ)
+    const prevKey = authOwnerKey(prev)
+    const prevRevision = ownerAuthorizationRevision(prev)
+    // 场景 A（同主人平滑升级）：首次将旧 ownerQQ 绑定同步为 ownerPersonId 时保留原有 revision
+    const smoothUpgrade = Boolean(
+      !prevPersonId
+      && c.ownerPersonId
+      && c.ownerQQ
+      && c.ownerQQ === prevQQ
+      && prev.ownerAuthorization?.owner === prevQQ
+      && prevRevision
+    )
+    // 场景 B（普通同主延续）：主体键及 ownerPersonId/ownerQQ 未变化且存在有效前置绑定时延续原 revision；其余换主/恢复重建一律轮换
+    const sameOwner = Boolean(
+      key === prevKey
+      && c.ownerPersonId === prevPersonId
+      && c.ownerQQ === prevQQ
+      && prevRevision
+    )
+    const revision = (smoothUpgrade || sameOwner) ? prevRevision : ''
+    c.ownerAuthorization = { owner: key, revision: revision || randomUUID() }
+  } else {
+    delete c.ownerAuthorization
+  }
   writeJson(FILE(), c)
   return c
 }
@@ -1205,6 +1240,10 @@ export function mergeFromPanel(current, incoming) {
   next.douyin.owner = { ...next.douyin.owner, ...Object.fromEntries(['secUid', 'uid', 'nickname', 'confirmedInput'].map((k) => [k, current.douyin?.owner?.[k] ?? ''])) }
   // 联动密钥只由插件生成，面板不能改
   next.bridge.token = current.bridge?.token || ''
+  // 主人身份编号仅由宿主按身份库同步，面板不可篡改
+  next.ownerPersonId = typeof current?.ownerPersonId === 'string' || typeof current?.ownerPersonId === 'number'
+    ? String(current.ownerPersonId).trim()
+    : ''
   // B 站：只改了其中一个值时，另一个保留；整串粘进来的会在 normalize 里拆开
   if (incoming?.bili && (incoming.bili.sessdata || incoming.bili.biliJct)) next.bili.cookie = ''
   if (incoming?.group?.overrides) next.group.overrides = incoming.group.overrides

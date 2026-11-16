@@ -14,7 +14,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import net from 'node:net'
-import { loadConfig, saveConfig, publicConfig, mergeFromPanel, ownerAuthorizationRevision } from './core/config.js'
+import { loadConfig, saveConfig, publicConfig, mergeFromPanel, authOwnerKey, ownerAuthorizationRevision } from './core/config.js'
 import { createLogger } from './core/logger.js'
 import { encodeResponse } from './core/http-compress.js'
 import { registerSecret, redact } from './core/redact.js'
@@ -180,7 +180,12 @@ export function apply(ctx) {
     try { identity.claimOwner('qq', cfg.ownerQQ) }
     catch (error) { log.warn('迁移配置主人 QQ 到身份主线失败：', error?.message || error) }
   }
-  if (cfg.ownerQQ && !ownerAuthorizationRevision(cfg)) {
+  const startupOwner = identity.owner() || ''
+  if (startupOwner !== cfg.ownerPersonId) {
+    try { cfg = saveConfig({ ...cfg, ownerPersonId: startupOwner }, cfg) }
+    catch { log.warn('同步主人身份编号失败，本次启动沿用旧配置') }
+  }
+  if (authOwnerKey(cfg) && !ownerAuthorizationRevision(cfg)) {
     try { cfg = saveConfig(cfg, cfg) }
     catch { log.warn('初始化主人授权记录失败，本次启动使用会话授权') }
   }
@@ -221,6 +226,13 @@ export function apply(ctx) {
     mods?.emit('config', cfg, before)
     if (JSON.stringify(before.backup?.remote) !== JSON.stringify(cfg.backup?.remote)) scheduleRemoteBackup()
     return cfg
+  }
+  const syncOwnerPersonId = () => {
+    const ownerNow = identity.owner() || ''
+    if (ownerNow !== cfg.ownerPersonId) {
+      setConfig({ ...cfg, ownerPersonId: ownerNow })
+    }
+    return ownerNow
   }
   secrets()
   seedPersonas()
@@ -869,6 +881,7 @@ export function apply(ctx) {
 
   // 网关建好之后再接线（惰性创建，见上面 ensureGateway 的说明）
   gatewayReady = (gw) => {
+    hub?.setGateway?.(gw)
     const offMsg = gw.onMessage((m) => {
       if (m && m.kind === 'private' && m.sender?.account) {
         const key = `${m.platform}:${m.sender.account}`
@@ -2396,7 +2409,7 @@ export function apply(ctx) {
     if (!ownerId) return { ok: false, message: '先认领主人身份' }
     if (body.platformOnly) {
       if (!hasAnyPlatform()) return { ok: false, message: '还没有启用的平台' }
-      setConfig({ ...cfg, setupDone: true })
+      setConfig({ ...cfg, ownerPersonId: ownerId, setupDone: true })
       log.info('首次使用向导完成（仅平台）')
       return { ...(await overview()), message: '设置完成，可以从平台页继续' }
     }
@@ -2405,7 +2418,7 @@ export function apply(ctx) {
       return { ok: false, message: '先填好不同的机器人 QQ 和你的 QQ' }
     }
     if (body.existingConnection && !(cfg.enabled && onebotState === 'connected' && loginOk)) return { ok: false, message: 'QQ 网关还没通过机器人号核对，请先连接并核对后再进入面板' }
-    setConfig({ ...cfg, setupDone: true })
+    setConfig({ ...cfg, ownerPersonId: ownerId, setupDone: true })
     log.info('首次使用向导完成')
     return { ...(await overview()), message: '设置完成，大肥鱼可以上线啦' }
   })
@@ -3023,6 +3036,7 @@ export function apply(ctx) {
     if (candidate?.instance) {
       try { platformGateway?.routing?.noteAccountInstance?.(candidate.instance, platform, account, Date.now()) } catch {}
     }
+    syncOwnerPersonId()
     return { ...platformView(), ok: true, person, message: '已把这个账号认成主人' }
   })
 
@@ -3130,6 +3144,7 @@ export function apply(ctx) {
     if (!from || !into || from === into) return { ok: false, message: '要选两个不同的人' }
     try {
       const r = await mergePerson({ from, into, dryRun: b.dryRun !== false, memory: use('memory'), identity, log })
+      if (r?.ok !== false && b.dryRun === false) syncOwnerPersonId()
       return { ...r, ok: r?.ok !== false, from, into, dryRun: b.dryRun !== false }
     } catch (error) { return { ok: false, message: error.message } }
   })
@@ -3138,7 +3153,11 @@ export function apply(ctx) {
     const platform = String(b.platform || '').trim()
     const account = String(b.account || '').trim()
     if (!platform || !account) return { ok: false, message: '缺少平台或账号' }
-    try { identity.unlink(platform, account); return { ...(await platformView()), ok: true, message: '已解绑这个账号' } } catch (error) { return { ok: false, message: error.message } }
+    try {
+      identity.unlink(platform, account)
+      syncOwnerPersonId()
+      return { ...(await platformView()), ok: true, message: '已解绑这个账号' }
+    } catch (error) { return { ok: false, message: error.message } }
   })
   route('/platforms/people/fixed', async (req) => {
     const b = await readBody(req)

@@ -1176,7 +1176,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         cfg.enabled && cfg.debug ? h(Card, { title: '调试对话', desc: '在这里直接跟她说话：走她的人格和工具，但不经过 QQ、不写记忆。和左侧栏那个调试会话是同一个会话。' }, h(DebugChat, { toast })) : null,
         cfg.enabled && !cfg.debug && cfg.dryRun ? h('div', { className: 'ab-note' }, '现在是试运行：她会照常思考回复，但只写进日志，不会真的发到 QQ。注意试运行**会照常写记忆**；只想试人格、不想留痕迹请切到「调试」。') : null,
         st.outbox && st.outbox.count ? h('div', { className: 'ab-note warn' }, `网关还没就绪：已有 ${st.outbox.count} 条消息排队，连接后会自动补发。`) : null,
-        cfg.enabled && !conn ? h('div', { className: 'ab-note err' }, '还没连上 QQ 网关' + (st.onebot.problem ? '：' + st.onebot.problem + '。' : '。去「连接」标签看看 SnowLuma 有没有装好、启动没有。') + ' ', h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('connect') } }, '去连接 →')) : null,
+        cfg.enabled && !conn && (cfg.botQQ || !Object.entries(cfg.platforms || {}).some(([k, p]) => k !== 'qq' && p && p.enabled !== false)) ? h('div', { className: 'ab-note err' }, '还没连上 QQ 网关' + (st.onebot.problem ? '：' + st.onebot.problem + '。' : '。去「连接」标签看看 SnowLuma 有没有装好、启动没有。') + ' ', h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('connect') } }, '去连接 →')) : null,
         st.outbox && st.outbox.count ? h('div', { className: 'ab-note warn' }, `网关还没就绪：已有 ${st.outbox.count} 条消息排队，连接后会自动补发。`) : null,
         h('div', { className: 'ab-grid ab-g4' },
           [['今天收到', s.received, '📥'], ['今天发出', s.sent, '📤'], ['语音条', s.voice, '🎙️'], ['表情包', s.stickers, '😺']].map(([l, n, ic]) => h('div', { key: l, className: 'ab-card ab-stat' }, h('span', { className: 'ic', 'aria-hidden': true }, ic), h('div', { className: 'n' }, n || 0), h('div', { className: 'l' }, l))),
@@ -2279,7 +2279,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         return false
       }
       const cfg = st.config
-      const owner = String(cfg.ownerQQ)
+      const owner = String(cfg.ownerQQ || '')
       const isOwnerChat = (value) => Boolean(value) && (String(value) === owner || String(value) === `private:${owner}` || ownerChatIds.includes(String(value)))
       const privateAllow = (cfg.allow.private || []).map(String)
       const isOpen = (qq) => isOwnerChat(qq) || privateAllow.includes(String(qq))
@@ -2499,8 +2499,19 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         } finally { setTestSending(false) }
       }
 
+      const ownerPersonId = (peopleInfo && peopleInfo.owner) || st?.config?.ownerPersonId || draft.ownerPersonId || ''
+      const ownerRow = ((peopleInfo && peopleInfo.list) || []).find((p) => p.owner || (ownerPersonId && p.person === ownerPersonId)) || null
+      const ownerAccSummary = (ownerRow?.accounts || []).map((a) => `${platformLabel(a.platform)} · ${a.account}`).join('、')
+
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '主人', desc: '主人的 QQ 号与主动消息接收账号。群管、点歌、电脑上的操作只听主人的。' },
+        h(Card, { title: '主人', desc: '主人的身份绑定、主动消息接收账号与可选 QQ 号。群管、点歌、电脑上的操作只听主人的。' },
+          h(Row, { label: '当前认主身份', hint: '主人身份在首次认主后由身份库与系统配置只读同步，用于敏感命令授权校验，无法在此手动篡改。' },
+            ownerPersonId
+              ? h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+                h('span', { className: 'ab-badge ok' }, '已认主'),
+                h('code', { className: 'ab-small' }, ownerPersonId),
+                ownerAccSummary ? h('span', { className: 'ab-small ab-muted' }, ownerAccSummary) : null)
+              : h('span', { className: 'ab-muted ab-small' }, '尚未认主（请到「通讯平台」或向导中认领主人）')),
           h(Row, { label: '大肥鱼的主账号（主动消息接收账号）', hint: '指定 ta 主动私聊找你、汇报结果或自测提醒时发往哪一个平台账号；不影响你在当前会话里和 ta 聊天时的原地回复。' },
             h('div', { style: { width: '100%', display: 'flex', flexDirection: 'column', gap: 6 } },
               h('div', { className: 'ab-flex', style: { gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
@@ -2518,7 +2529,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             )),
           h(Row, { label: '主账号不可用时，允许普通主动聊天改发其他在线平台', hint: '默认关闭。关闭时若主账号离线或未绑定，ta 会暂停主动搭话、汇报等普通主动消息，绝不串发到其他平台。' }, f.sw('ownerPrimary.fallback')),
           h(Row, { label: '主账号不可用时，允许系统重要通知与自测提醒改发其他在线平台（不含无会话危险操作）', hint: '默认开启。仅影响系统提醒与「测试发送给主账号」；无归属会话的危险操作与授权仍按原地 fail-closed 处理。' }, f.sw('ownerPrimary.noticeFallback')),
-          h(Row, { label: '主人 QQ 号' }, f.text('ownerQQ')),
+          h(Row, { label: '主人 QQ 号（可选）', hint: '仅在使用 QQ 网关或兼容旧 QQ 功能时填写；纯飞书 / QQ 官方机器人 / 通用桥主人认主后可留空。' }, f.text('ownerQQ', { placeholder: ownerPersonId ? '纯非 QQ 平台可留空' : '例如 123456789' })),
           h(Row, { label: 'ta怎么称呼你' }, f.text('ownerName', { placeholder: '主人' })),
           h(Row, { label: '主人私聊的权限', hint: '群聊永远没有电脑操作权限，这里管不到群。' },
             h('div', { style: { width: '100%' } },
@@ -9585,7 +9596,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       const cfg = st.config
       const conn = st.onebot.state === 'connected'
-      const status = !cfg.enabled ? { cls: '', text: '休息中（总开关关着）' } : !conn ? { cls: 'err', text: 'QQ 没连上' } : cfg.debug ? { cls: 'warn', text: '在线 · 调试' } : cfg.dryRun ? { cls: 'warn', text: '在线 · 试运行' } : { cls: 'ok', text: '在线' }
+      const hasExternalPlatform = Object.entries(cfg.platforms || {}).some(([k, p]) => k !== 'qq' && p && p.enabled !== false)
+      const qqRequired = Boolean(cfg.botQQ) || !hasExternalPlatform
+      const status = !cfg.enabled ? { cls: '', text: '休息中（总开关关着）' } : (qqRequired && !conn) ? { cls: 'err', text: 'QQ 没连上' } : cfg.debug ? { cls: 'warn', text: '在线 · 调试' } : cfg.dryRun ? { cls: 'warn', text: '在线 · 试运行' } : { cls: 'ok', text: conn ? '在线' : '在线（多平台）' }
       const persona = st.personas.find((p) => p.id === cfg.persona.current)
       const props = { st, draft, setDraft: setD, toast, reload, go, openWizard: () => setWizardOpen(true) }
       const showWizard = !cfg.setupDone || wizardOpen
@@ -9637,7 +9650,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('button', { type: 'button', className: 'ab-avatar-btn', title: '点击换头像', onClick: () => pickAvatar(toast, reload) }, h('img', { className: 'ab-avatar', src: avatarSrc(st), alt: '头像' }), h('span', { className: 'ab-avatar-tip' }, '换头像')),
             h('div', { className: 'ab-hero-main' },
               h('h1', null, (st.onebot.login && st.onebot.login.nickname) || '大肥鱼'),
-              h('div', { className: 'ab-sub' }, 'QQ ' + cfg.botQQ + ' · ' + (persona ? persona.name : '默认人格') + ' · ' + st.mood.label),
+              h('div', { className: 'ab-sub' }, (cfg.botQQ ? 'QQ ' + cfg.botQQ + ' · ' : '') + (persona ? persona.name : '默认人格') + ' · ' + st.mood.label),
               h('div', { className: 'ab-pills' },
                 h('span', { className: 'ab-pill' }, h('i', { className: cx('ab-dot', status.cls) }), status.text),
                 h('span', { className: 'ab-pill' }, 'SnowLuma ' + (st.snowluma.installed ? (st.snowluma.running ? '运行中' : '没启动') : '未安装')),

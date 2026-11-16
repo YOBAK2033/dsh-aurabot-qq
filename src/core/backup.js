@@ -585,17 +585,21 @@ function runRestoreMoves(run) {
   }
 }
 
-function finalConfig(data, file, info, root, workspaceDir) {
+function finalConfig(data, file, info, root, workspaceDir, { restoreIdentity = false } = {}) {
   const original = readFileSync(verifyFile(data, file).path, 'utf8')
   const esc = (s) => JSON.stringify(s).slice(1, -1)
   const adjusted = info.dataDir && info.dataDir !== root ? original.replaceAll(esc(info.dataDir), esc(root)) : original
   const parsed = JSON.parse(adjusted)
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('备份配置格式无效')
   // Restoring an archive must not restore an earlier owner's authorization revision.
-  const revoked = Object.hasOwn(parsed, 'ownerAuthorization')
-  if (revoked) delete parsed.ownerAuthorization
+  let changed = Object.hasOwn(parsed, 'ownerAuthorization')
+  if (changed) delete parsed.ownerAuthorization
+  if (!restoreIdentity && Object.hasOwn(parsed, 'ownerPersonId') && !existsSync(join(root, 'gateway', IDENTITY_FILE))) {
+    delete parsed.ownerPersonId
+    changed = true
+  }
   if (workspaceDir) return JSON.stringify({ ...parsed, workspaceDir }, null, 2)
-  if (revoked) return JSON.stringify(parsed, null, 2)
+  if (changed) return JSON.stringify(parsed, null, 2)
   return adjusted === original ? null : adjusted
 }
 
@@ -632,6 +636,30 @@ function rebuildIdentityFromRestoredMemory(root) {
   const identity = createIdentity({ dataDir: join(root, 'gateway') })
   const res = identity.importLegacyQQ(numbers)
   return res.added + res.existing
+}
+
+/** 恢复后按实际落盘身份库同步或清理 config.json 的 ownerPersonId（绝不沿用错配或旧代次授权）。 */
+function syncRestoredOwnerPersonId(root) {
+  const gwIdentityFile = join(root, 'gateway', IDENTITY_FILE)
+  let currentOwner = ''
+  if (existsSync(gwIdentityFile)) {
+    try { currentOwner = createIdentity({ dataDir: join(root, 'gateway') }).owner() || '' } catch {}
+  }
+  try {
+    const cfgPath = join(root, 'config.json')
+    const currentCfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
+    if (!currentCfg || typeof currentCfg !== 'object' || Array.isArray(currentCfg)) return
+    const prevPid = String(currentCfg.ownerPersonId || '').trim()
+    if (currentOwner) {
+      if (prevPid === currentOwner) return
+      currentCfg.ownerPersonId = currentOwner
+    } else if (Object.hasOwn(currentCfg, 'ownerPersonId')) {
+      delete currentCfg.ownerPersonId
+    } else {
+      return
+    }
+    writeFileSync(cfgPath, JSON.stringify(currentCfg, null, 2))
+  } catch {}
 }
 
 /** 最近一次恢复的结构化结果（含旧备份重建身份表时的明确提示）。 */
@@ -676,7 +704,7 @@ export function applyPendingRestore(now = Date.now(), { root: customRoot = '' } 
     if (current.info) originals.set(rel, { rel, key: current.key })
   }
   const sessions = planSessionRestore(data, info)
-  const configText = finalConfig(data, config.file, info, root, sessions?.target)
+  const configText = finalConfig(data, config.file, info, root, sessions?.target, { restoreIdentity })
   const job = '.restore-apply-' + randomUUID() + '.tmp'
   mkdirSync(checkPath(data, job, { directory: true }).path, { mode: 0o700 })
   let keepJob = false
@@ -719,6 +747,7 @@ export function applyPendingRestore(now = Date.now(), { root: customRoot = '' } 
       identityRebuilt = true
       notice = REBUILD_NOTICE
     }
+    syncRestoredOwnerPersonId(root)
     cachedRestoreResult = {
       files: files.length,
       memoryRestored: restoreMemory,
