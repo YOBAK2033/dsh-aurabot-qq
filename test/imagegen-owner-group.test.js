@@ -63,7 +63,7 @@ function setup(t, { beforeDraw } = {}) {
     core: { hub, identity, routeOwner: identity.routeOwner, local: { active: name => name === 'image', call: async () => { draws++; throw new Error('TEST_AUTHORIZED_NO_IMAGE_API') } } },
   })
   fake.ctx.effect(() => fake.ctx.on('session/event', hub.onSessionEvent))
-  t.after(() => { if (!fake.turns.length) t.diagnostic(fake.logs.join('\n')); hub.dispose(); fake.dispose(); rmSync(dir, { recursive: true, force: true }) })
+  t.after(() => { if (!fake.turns.length) t.diagnostic(fake.logs.join('\n')); hub.dispose(); fake.dispose(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
   return { hub, fake, cfg, snapshots, draws: () => draws, batch: async (...messages) => {
     const before = fake.turns.length
     for (const message of messages) await hub.onMessage(message)

@@ -182,8 +182,8 @@ export function apply(ctx) {
   }
   const startupOwner = identity.owner() || ''
   const legacyQqOwner = cfg.ownerQQ && startupOwner ? identity.lookup('qq', cfg.ownerQQ) : ''
-  if (startupOwner && !cfg.ownerPersonId && cfg.ownerQQ && legacyQqOwner !== startupOwner) {
-    log.warn('配置里的旧 ownerQQ 与当前身份库主人不一致，已清空旧 ownerQQ 并重置授权代次')
+  if (startupOwner && cfg.ownerQQ && legacyQqOwner !== startupOwner) {
+    log.warn('配置里的 ownerQQ 与当前身份库主人不一致，已清空陈旧 ownerQQ 并重置授权代次')
     const actualQq = identity.accountOn(startupOwner, 'qq') || ''
     try { cfg = saveConfig({ ...cfg, ownerQQ: actualQq, ownerPersonId: startupOwner }, { ...cfg, ownerAuthorization: undefined }) }
     catch { log.warn('重置不一致主人配置失败，本次启动沿用会话授权') }
@@ -3096,10 +3096,11 @@ export function apply(ctx) {
           proactive: null,
           legacy: false,
           multiInstance: false,
+          hasInstance: false,
           observed: knownInstances.includes(acc.platform),
           knownInstances: [...knownInstances],
-          unlinkedOnInstance: false,
-          selectable: true,
+          unlinkedOnInstance: true,
+          selectable: false,
         })
         continue
       }
@@ -3121,6 +3122,7 @@ export function apply(ctx) {
           proactive: inst.legacy ? 'free' : (inst.caps?.proactive ?? null),
           legacy: Boolean(inst.legacy),
           multiInstance,
+          hasInstance: true,
           observed,
           knownInstances: inst.legacy ? [inst.instance] : [...knownInstances],
           unlinkedOnInstance,

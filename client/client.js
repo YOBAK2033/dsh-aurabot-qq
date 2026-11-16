@@ -1412,6 +1412,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     )
     const isOwnerOptionSelectable = (o) => {
       if (!o || o.canProactive === false) return false
+      if (o.hasInstance === false) return false
       if (o.selectable === false) return false
       if (o.multiInstance && o.observed === false) return false
       return true
@@ -1831,16 +1832,20 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                       const canSelect = isOwnerOptionSelectable(o)
                       const btnTitle = !o.canProactive
                         ? '仅支持回复，无法设为主账号'
-                        : !canSelect
-                          ? '当前实例尚未观测到该账号，先从该实例发一条私聊后再设为该实例主账号'
-                          : (isCurrent ? '已经是当前主账号' : '将该账号设为主账号')
+                        : o.hasInstance === false
+                          ? '尚未配置该平台实例，无法设为主账号'
+                          : !canSelect
+                            ? '当前实例尚未观测到该账号，先从该实例发一条私聊后再设为该实例主账号'
+                            : (isCurrent ? '已经是当前主账号' : '将该账号设为主账号')
                       const btnText = isCurrent
                         ? '当前主账号'
                         : !o.canProactive
                           ? '仅支持回复'
-                          : !canSelect
-                            ? (o.multiInstance ? `${o.instance} 未观测` : '当前实例未观测')
-                            : (o.multiInstance ? `设为 ${o.instance} 主账号` : '设为主账号')
+                          : o.hasInstance === false
+                            ? '未配置实例'
+                            : !canSelect
+                              ? (o.multiInstance ? `${o.instance} 未观测` : '当前实例未观测')
+                              : (o.multiInstance ? `设为 ${o.instance} 主账号` : '设为主账号')
                       return h(Btn, {
                         key: o.key,
                         small: true,
@@ -2487,15 +2492,17 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         const selectable = isOwnerOptionSelectable(o)
         const statusPart = !o.canProactive
           ? '（仅支持回复，无法设为主账号）'
-          : !selectable
-            ? '（当前实例未观测到，无法设为主账号）'
-            : !o.enabled
-              ? '（已停用）'
-              : o.state === 'connected'
-                ? '（在线）'
-                : o.state === 'connecting'
-                  ? '（连接中）'
-                  : '（未连接）'
+          : o.hasInstance === false
+            ? '（未配置平台实例，无法设为主账号）'
+            : !selectable
+              ? '（当前实例未观测到，无法设为主账号）'
+              : !o.enabled
+                ? '（已停用）'
+                : o.state === 'connected'
+                  ? '（在线）'
+                  : o.state === 'connecting'
+                    ? '（连接中）'
+                    : '（未连接）'
         const unobservedTag = selectable && !o.multiInstance && o.observed === false && !o.legacy ? ' · 未观测' : ''
         return platformLabel(o.platform) + instPart + ' · ' + o.account + statusPart + unobservedTag
       }

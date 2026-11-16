@@ -272,6 +272,41 @@ test('P4-3: 宿主启动平滑升级、无 ownerQQ 纯非 QQ 认主向导完成�
     assert.equal(afterCfg.ownerAuthorization?.owner, pOther)
   }
 
+  // ── 子情景 A3（复审边界 #1）：配置已落盘为错误的 { ownerPersonId: p-other, ownerQQ: 10001, ownerAuthorization: { owner: p-other, revision: leakedRev } } 时，启动仍必须校验并轮换 ──
+  {
+    const persistedMismatchDir = freshDataDir('aurabot-p4-host-persisted-mismatch-')
+    const idStore = createIdentity({ dataDir: join(persistedMismatchDir, 'gateway'), log: noopLog })
+    const pOther = idStore.claimOwner('feishu', 'ou_real_owner')
+    const leaked = saveConfig({
+      enabled: false,
+      setupDone: true,
+      ownerQQ: '10001',
+      ownerPersonId: pOther,
+      botQQ: '20002',
+      snowluma: { autoStart: false },
+    }, {}, { verifiedOwnerUpgrade: true })
+    const leakedRev = ownerAuthorizationRevision(leaked)
+    assert.ok(leakedRev)
+
+    const fake = createFakeDsh({ brain: async () => '好的' })
+    const applied = hostMod.apply(fake.ctx)
+    t.after(async () => {
+      try { await applied.gateway?.stopAll?.() } catch {}
+      try { applied.modules?.dispose?.() } catch {}
+      try { applied.onebot?.disconnect?.() } catch {}
+      try { fake.dispose() } catch {}
+    })
+    await applied.ready
+
+    const afterCfg = applied.getConfig()
+    assert.equal(afterCfg.ownerPersonId, pOther)
+    assert.equal(afterCfg.ownerQQ, '', '已落盘的陈旧 ownerQQ 在启动校验时也必须被清空')
+    const rotatedRev = ownerAuthorizationRevision(afterCfg)
+    assert.ok(rotatedRev)
+    assert.notEqual(rotatedRev, leakedRev, '已落盘但 ownerQQ 与身份库不匹配时必须重置授权代次')
+    assert.equal(afterCfg.ownerAuthorization?.owner, pOther)
+  }
+
   // ── 子情景 B：纯非 QQ 从零安装 -> 添加平台 -> 认主(/platforms/claim) -> 向导完成(/setup/done) -> 面板保存防篡改 -> /permissions 触发授权 ──
   {
     const cleanDir = freshDataDir('aurabot-p4-host-nonqq-')
