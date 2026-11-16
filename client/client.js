@@ -1078,7 +1078,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       useEffect(() => { loadUsage() }, [])
       const cfg = st.config
       const s = st.stats || {}
-      const conn = st.onebot.state === 'connected'
+      const { conn, qqRequired, anyExternalConnected } = platformConnectionSummary(st)
       const quick = (p, body) => async () => { const r = await post(p, body); toast(r.message || (r.ok ? '好了' : '没成功')) }
       const usageToday = usage && usage.ranges ? usage.ranges.today : null
       // 维度小表：名称在左，其余数字右对齐；金额加粗提一档
@@ -1176,7 +1176,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         cfg.enabled && cfg.debug ? h(Card, { title: '调试对话', desc: '在这里直接跟她说话：走她的人格和工具，但不经过 QQ、不写记忆。和左侧栏那个调试会话是同一个会话。' }, h(DebugChat, { toast })) : null,
         cfg.enabled && !cfg.debug && cfg.dryRun ? h('div', { className: 'ab-note' }, '现在是试运行：她会照常思考回复，但只写进日志，不会真的发到 QQ。注意试运行**会照常写记忆**；只想试人格、不想留痕迹请切到「调试」。') : null,
         st.outbox && st.outbox.count ? h('div', { className: 'ab-note warn' }, `网关还没就绪：已有 ${st.outbox.count} 条消息排队，连接后会自动补发。`) : null,
-        cfg.enabled && !conn && (cfg.botQQ || !Object.entries(cfg.platforms || {}).some(([k, p]) => k !== 'qq' && p && p.enabled !== false)) ? h('div', { className: 'ab-note err' }, '还没连上 QQ 网关' + (st.onebot.problem ? '：' + st.onebot.problem + '。' : '。去「连接」标签看看 SnowLuma 有没有装好、启动没有。') + ' ', h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('connect') } }, '去连接 →')) : null,
+        cfg.enabled && qqRequired && !conn ? h('div', { className: 'ab-note err' }, '还没连上 QQ 网关' + (st.onebot.problem ? '：' + st.onebot.problem + '。' : '。去「连接」标签看看 SnowLuma 有没有装好、启动没有。') + ' ', h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('connect') } }, '去连接 →')) : null,
+        cfg.enabled && !qqRequired && !anyExternalConnected && !conn ? h('div', { className: 'ab-note err' }, '还没有已连接的通讯平台，当前无法收发消息。', ' ', h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('platforms') } }, '去通讯平台 →')) : null,
         st.outbox && st.outbox.count ? h('div', { className: 'ab-note warn' }, `网关还没就绪：已有 ${st.outbox.count} 条消息排队，连接后会自动补发。`) : null,
         h('div', { className: 'ab-grid ab-g4' },
           [['今天收到', s.received, '📥'], ['今天发出', s.sent, '📤'], ['语音条', s.voice, '🎙️'], ['表情包', s.stickers, '😺']].map(([l, n, ic]) => h('div', { key: l, className: 'ab-card ab-stat' }, h('span', { className: 'ic', 'aria-hidden': true }, ic), h('div', { className: 'n' }, n || 0), h('div', { className: 'l' }, l))),
@@ -1398,7 +1399,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     const ownerPrimaryLabel = (pref) => {
       const p = pref || {}
       if (p.mode === 'recent') return '跟随最近私聊平台（recent）'
-      if (!p.platform && !p.instance) return '未单独指定（默认优先 QQ）'
+      if (!p.platform && !p.instance) return '未单独指定（有 QQ 时优先 QQ，否则跟随最近平台）'
       const basePlat = p.platform || String(p.instance || '').split('#')[0]
       return ownerTargetText({ platform: basePlat, instance: p.instance || basePlat, account: p.account })
     }
@@ -1409,6 +1410,30 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       && (o.multiInstance ? pref.instance === o.instance : (!pref.instance || pref.instance === o.instance))
       && (!pref.account || pref.account === o.account)
     )
+    const isOwnerOptionSelectable = (o) => {
+      if (!o || o.canProactive === false) return false
+      if (o.selectable === false) return false
+      if (o.multiInstance && o.observed === false) return false
+      return true
+    }
+    const platformConnectionSummary = (st) => {
+      const cfg = (st && st.config) || {}
+      const conn = Boolean(st && st.onebot && st.onebot.state === 'connected')
+      const rawInsts = Array.isArray(st && st.platforms) && st.platforms.length
+        ? st.platforms
+        : Object.entries(cfg.platforms || {}).map(([k, p]) => ({
+          instance: k,
+          platform: (p && p.platform) || String(k).split('#')[0] || k,
+          enabled: Boolean(p && p.enabled !== false),
+          legacy: k === 'qq' && Boolean(cfg.enabled),
+          state: 'stopped',
+        }))
+      const extEnabled = rawInsts.filter((x) => !x.legacy && x.platform !== 'qq' && x.enabled !== false)
+      const hasExternalPlatform = extEnabled.length > 0
+      const anyExternalConnected = extEnabled.some((x) => x.state === 'connected')
+      const qqRequired = Boolean(cfg.botQQ) || !hasExternalPlatform
+      return { conn, hasExternalPlatform, anyExternalConnected, qqRequired }
+    }
 
     const TOOL_STATUS = { ready: '已就绪', missing: '未找到', invalid: '不可用' }
     const TOOL_SOURCE = { auto: '自动检测', legacy: '旧 B 站设置', config: '手动指定', managed: '托管安装' }
@@ -1803,14 +1828,27 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                       h('button', { type: 'button', title: '解绑', style: { marginLeft: 6, border: 0, background: 'none', cursor: 'pointer' }, onClick: () => unlink(a) }, '×')),
                     accOpts.map((o) => {
                       const isCurrent = isOwnerOptionSelected(curPref, o)
+                      const canSelect = isOwnerOptionSelectable(o)
+                      const btnTitle = !o.canProactive
+                        ? '仅支持回复，无法设为主账号'
+                        : !canSelect
+                          ? '当前实例尚未观测到该账号，先从该实例发一条私聊后再设为该实例主账号'
+                          : (isCurrent ? '已经是当前主账号' : '将该账号设为主账号')
+                      const btnText = isCurrent
+                        ? '当前主账号'
+                        : !o.canProactive
+                          ? '仅支持回复'
+                          : !canSelect
+                            ? (o.multiInstance ? `${o.instance} 未观测` : '当前实例未观测')
+                            : (o.multiInstance ? `设为 ${o.instance} 主账号` : '设为主账号')
                       return h(Btn, {
                         key: o.key,
                         small: true,
                         kind: isCurrent ? 'ghost' : undefined,
-                        disabled: busy === 'owner-primary' || !o.canProactive || isCurrent,
-                        title: !o.canProactive ? '仅支持回复，无法设为主账号' : (isCurrent ? '已经是当前主账号' : '将该账号设为主账号'),
+                        disabled: busy === 'owner-primary' || !canSelect || isCurrent,
+                        title: btnTitle,
                         onClick: () => setPrimary({ mode: 'fixed', platform: o.platform, instance: o.instance, account: o.account }),
-                      }, isCurrent ? '当前主账号' : (!o.canProactive ? '仅支持回复' : (o.multiInstance ? `设为 ${o.instance} 主账号` : '设为主账号')))
+                      }, btnText)
                     }))
                 }) : h('span', { className: 'ab-small ab-muted' }, '还没有账号')),
             )
@@ -2446,16 +2484,20 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
       const formatOptLabel = (o) => {
         const instPart = (o.multiInstance || (o.instance && o.instance !== o.platform)) ? ` · ${o.instance}` : ''
+        const selectable = isOwnerOptionSelectable(o)
         const statusPart = !o.canProactive
           ? '（仅支持回复，无法设为主账号）'
-          : !o.enabled
-            ? '（已停用）'
-            : o.state === 'connected'
-              ? '（在线）'
-              : o.state === 'connecting'
-                ? '（连接中）'
-                : '（未连接）'
-        return platformLabel(o.platform) + instPart + ' · ' + o.account + statusPart
+          : !selectable
+            ? '（当前实例未观测到，无法设为主账号）'
+            : !o.enabled
+              ? '（已停用）'
+              : o.state === 'connected'
+                ? '（在线）'
+                : o.state === 'connecting'
+                  ? '（连接中）'
+                  : '（未连接）'
+        const unobservedTag = selectable && !o.multiInstance && o.observed === false && !o.legacy ? ' · 未观测' : ''
+        return platformLabel(o.platform) + instPart + ' · ' + o.account + statusPart + unobservedTag
       }
 
       const proRoute = peopleInfo && peopleInfo.resolvedProactiveRoute
@@ -2516,9 +2558,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { style: { width: '100%', display: 'flex', flexDirection: 'column', gap: 6 } },
               h('div', { className: 'ab-flex', style: { gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
                 h('select', { className: 'ab-select', 'aria-label': '大肥鱼的主账号', value: selectValue, onChange: (e) => onSelectPrimary(e.target.value) },
-                  h('option', { value: '__default__' }, '未单独指定（默认优先 QQ）'),
+                  h('option', { value: '__default__' }, '未单独指定（有 QQ 时优先 QQ，否则跟随最近平台）'),
                   h('option', { value: '__recent__' }, '跟随最近私聊平台（recent）'),
-                  options.map((o) => h('option', { key: o.key, value: optValue(o), disabled: !o.canProactive }, formatOptLabel(o))),
+                  options.map((o) => h('option', { key: o.key, value: optValue(o), disabled: !isOwnerOptionSelectable(o) }, formatOptLabel(o))),
                   selectValue === '__orphan__' ? h('option', { value: '__orphan__' }, ownerPrimaryLabel(pref) + '（当前配置，待刷新或已解绑）') : null),
                 h(Btn, { small: true, disabled: testSending, onClick: testSend }, testSending ? '发送中…' : '测试发送给主账号'),
               ),
@@ -2529,7 +2571,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             )),
           h(Row, { label: '主账号不可用时，允许普通主动聊天改发其他在线平台', hint: '默认关闭。关闭时若主账号离线或未绑定，ta 会暂停主动搭话、汇报等普通主动消息，绝不串发到其他平台。' }, f.sw('ownerPrimary.fallback')),
           h(Row, { label: '主账号不可用时，允许系统重要通知与自测提醒改发其他在线平台（不含无会话危险操作）', hint: '默认开启。仅影响系统提醒与「测试发送给主账号」；无归属会话的危险操作与授权仍按原地 fail-closed 处理。' }, f.sw('ownerPrimary.noticeFallback')),
-          h(Row, { label: '主人 QQ 号（可选）', hint: '仅在使用 QQ 网关或兼容旧 QQ 功能时填写；纯飞书 / QQ 官方机器人 / 通用桥主人认主后可留空。' }, f.text('ownerQQ', { placeholder: ownerPersonId ? '纯非 QQ 平台可留空' : '例如 123456789' })),
+          h(Row, { label: '主人 QQ 号（可选）', hint: '仅在使用 QQ 网关或兼容旧 QQ 功能时填写；纯飞书 / QQ 官方机器人 / 通用桥主人认主后可留空。修改此项会重置当前敏感命令授权代次。' }, f.text('ownerQQ', { placeholder: ownerPersonId ? '纯非 QQ 平台可留空' : '例如 123456789' })),
           h(Row, { label: 'ta怎么称呼你' }, f.text('ownerName', { placeholder: '主人' })),
           h(Row, { label: '主人私聊的权限', hint: '群聊永远没有电脑操作权限，这里管不到群。' },
             h('div', { style: { width: '100%' } },
@@ -9595,10 +9637,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         return h('div', { className: 'ab-root' }, h('div', { className: 'ab-wrap' }, err ? h('div', { className: 'ab-note err' }, '面板读不到插件：', err, '。如果刚装好插件，重启一次 DSH 试试。') : h(Empty, { icon: '🐋', text: '大肥鱼正在游过来…' })))
       }
       const cfg = st.config
-      const conn = st.onebot.state === 'connected'
-      const hasExternalPlatform = Object.entries(cfg.platforms || {}).some(([k, p]) => k !== 'qq' && p && p.enabled !== false)
-      const qqRequired = Boolean(cfg.botQQ) || !hasExternalPlatform
-      const status = !cfg.enabled ? { cls: '', text: '休息中（总开关关着）' } : (qqRequired && !conn) ? { cls: 'err', text: 'QQ 没连上' } : cfg.debug ? { cls: 'warn', text: '在线 · 调试' } : cfg.dryRun ? { cls: 'warn', text: '在线 · 试运行' } : { cls: 'ok', text: conn ? '在线' : '在线（多平台）' }
+      const { conn, qqRequired, anyExternalConnected } = platformConnectionSummary(st)
+      const status = !cfg.enabled
+        ? { cls: '', text: '休息中（总开关关着）' }
+        : qqRequired
+          ? (!conn ? { cls: 'err', text: 'QQ 没连上' } : cfg.debug ? { cls: 'warn', text: '在线 · 调试' } : cfg.dryRun ? { cls: 'warn', text: '在线 · 试运行' } : { cls: 'ok', text: '在线' })
+          : (!anyExternalConnected && !conn)
+            ? { cls: 'err', text: '平台未连接' }
+            : cfg.debug
+              ? { cls: 'warn', text: '在线 · 调试' }
+              : cfg.dryRun
+                ? { cls: 'warn', text: '在线 · 试运行' }
+                : { cls: 'ok', text: conn ? '在线' : '在线（多平台）' }
       const persona = st.personas.find((p) => p.id === cfg.persona.current)
       const props = { st, draft, setDraft: setD, toast, reload, go, openWizard: () => setWizardOpen(true) }
       const showWizard = !cfg.setupDone || wizardOpen

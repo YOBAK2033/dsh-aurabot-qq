@@ -79,15 +79,21 @@ test('P4-1: config.js 三分支 ownerAuthorization 规则与 mergeFromPanel 防�
   assert.equal(authOwnerKey({ ownerPersonId: 'p-feishu', ownerQQ: '' }), 'p-feishu')
   assert.equal(authOwnerKey({ ownerPersonId: '', ownerQQ: '' }), '')
 
-  // 场景 A：旧 ownerQQ 平滑首次升级写入 ownerPersonId 时保留原有 revision
+  // 场景 A：旧 ownerQQ 平滑首次升级写入 ownerPersonId 时，未经过核验的直接 saveConfig 不得继承旧 revision；
+  // 只有显式传 verifiedOwnerUpgrade: true（宿主核验 identity 归属同主人）才保留原 revision
   const c0 = saveConfig({ ownerQQ: '10001' }, {})
   const r0 = ownerAuthorizationRevision(c0)
   assert.ok(r0)
   assert.deepEqual(c0.ownerAuthorization, { owner: '10001', revision: r0 })
 
-  const cUpgrade = saveConfig({ ...c0, ownerPersonId: 'p-owner-a' }, c0)
+  const cUnverified = saveConfig({ ...c0, ownerPersonId: 'p-other-person' }, c0)
+  const rUnverified = ownerAuthorizationRevision(cUnverified)
+  assert.ok(rUnverified)
+  assert.notEqual(rUnverified, r0, '未核验归属时 saveConfig 不得将旧 QQ 主人 revision 转给其他 PersonId')
+
+  const cUpgrade = saveConfig({ ...c0, ownerPersonId: 'p-owner-a' }, c0, { verifiedOwnerUpgrade: true })
   assert.equal(cUpgrade.ownerPersonId, 'p-owner-a')
-  assert.equal(ownerAuthorizationRevision(cUpgrade), r0, '同主人平滑升级不得轮换 revision')
+  assert.equal(ownerAuthorizationRevision(cUpgrade), r0, '同主人核验平滑升级保留原 revision')
   assert.deepEqual(cUpgrade.ownerAuthorization, { owner: 'p-owner-a', revision: r0 })
 
   // 后续普通保存维持原 revision
@@ -236,6 +242,34 @@ test('P4-3: 宿主启动平滑升级、无 ownerQQ 纯非 QQ 认主向导完成�
     assert.equal(afterCfg.ownerPersonId, claimedOwner)
     assert.equal(ownerAuthorizationRevision(afterCfg), preRev, '宿主首次同步 ownerPersonId 时必须保留旧 revision')
     assert.deepEqual(afterCfg.ownerAuthorization, { owner: claimedOwner, revision: preRev })
+  }
+
+  // ── 子情景 A2（高风险安全边界）：identity.owner()=p-other 与配置旧 ownerQQ=10001 不匹配时，绝不能继承旧 revision ──
+  {
+    const mismatchDir = freshDataDir('aurabot-p4-host-mismatch-')
+    const pre = saveConfig({ enabled: false, setupDone: true, ownerQQ: '10001', botQQ: '20002', snowluma: { autoStart: false } }, {})
+    const staleRev = ownerAuthorizationRevision(pre)
+    assert.ok(staleRev)
+    const idStore = createIdentity({ dataDir: join(mismatchDir, 'gateway'), log: noopLog })
+    const pOther = idStore.claimOwner('feishu', 'ou_new_owner')
+
+    const fake = createFakeDsh({ brain: async () => '好的' })
+    const applied = hostMod.apply(fake.ctx)
+    t.after(async () => {
+      try { await applied.gateway?.stopAll?.() } catch {}
+      try { applied.modules?.dispose?.() } catch {}
+      try { applied.onebot?.disconnect?.() } catch {}
+      try { fake.dispose() } catch {}
+    })
+    await applied.ready
+
+    const afterCfg = applied.getConfig()
+    assert.equal(afterCfg.ownerPersonId, pOther)
+    assert.equal(afterCfg.ownerQQ, '', '陈旧不匹配的 ownerQQ 应被清空')
+    const newRev = ownerAuthorizationRevision(afterCfg)
+    assert.ok(newRev)
+    assert.notEqual(newRev, staleRev, '不同 PersonId 绝对不得继承旧 QQ 主人的 authorization revision')
+    assert.equal(afterCfg.ownerAuthorization?.owner, pOther)
   }
 
   // ── 子情景 B：纯非 QQ 从零安装 -> 添加平台 -> 认主(/platforms/claim) -> 向导完成(/setup/done) -> 面板保存防篡改 -> /permissions 触发授权 ──
@@ -433,7 +467,7 @@ test('P4-4: 前端 client.js 对纯非 QQ 主人的 GlobalAccess 展示、向导
 
   const instrumented = source.replace(
     marker,
-    '    exports.p4Test = { GlobalAccess, AurabotPage }\n' + marker,
+    '    exports.p4Test = { GlobalAccess, AurabotPage, Overview }\n' + marker,
   )
 
   const script = new Script(instrumented, { filename: 'client/client.js' })
@@ -505,6 +539,7 @@ test('P4-4: 前端 client.js 对纯非 QQ 主人的 GlobalAccess 展示、向导
     subagentBackground: false,
     profilePerms: {},
     persona: { current: 'default' },
+    diary: { enabled: false },
     allow: { private: [], groups: [] },
     platforms: { feishu: { enabled: true } },
   }
@@ -539,37 +574,52 @@ test('P4-4: 前端 client.js 对纯非 QQ 主人的 GlobalAccess 展示、向导
   assert.match(gaText, /主人 QQ 号（可选）/)
   assert.match(gaText, /可留空/)
 
-  // 2) AurabotPage：纯非 QQ 在线时不应再报错「QQ 没连上」，也不应出现孤立「QQ 」头衔前缀
+  // 2) AurabotPage + Overview：纯非 QQ 离线（启用但 disconnected）必须报「平台未连接」与警告；已连接才显示「在线（多平台）」
+  const offlineSt = {
+    ok: true,
+    version: '1.5.0',
+    startedAt: Date.now(),
+    config: nonQqCfg,
+    platforms: [{ instance: 'feishu', platform: 'feishu', name: 'feishu', enabled: true, legacy: false, state: 'disconnected' }],
+    onebot: { state: 'unconfigured', login: null, endpoint: {}, problem: '' },
+    snowluma: { installed: false, running: false },
+    mood: { value: 80, label: '开心' },
+    personas: [{ id: 'default', name: '大肥鱼默认' }],
+    stickers: { count: 0 },
+    diary: { next: 0, last: null },
+    stats: { received: 0, sent: 0, voice: 0, stickers: 0 },
+    sessions: {},
+    modules: [],
+  }
   hook = 0
-  state = [
-    {
-      ok: true,
-      version: '1.5.0',
-      startedAt: Date.now(),
-      config: nonQqCfg,
-      onebot: { state: 'unconfigured', login: null, endpoint: {}, problem: '' },
-      snowluma: { installed: false, running: false },
-      mood: { value: 80, label: '开心' },
-      personas: [{ id: 'default', name: '大肥鱼默认' }],
-      stickers: { count: 0 },
-      diary: { next: 0, last: null },
-      stats: { received: 0, sent: 0, voice: 0, stickers: 0 },
-      sessions: {},
-      modules: [],
-    },
-    '',
-    JSON.parse(JSON.stringify(nonQqCfg)),
-    'overview',
-    null,
-    false,
-  ]
+  state = [offlineSt, '', JSON.parse(JSON.stringify(nonQqCfg)), 'overview', null, false]
+  const offlinePageText = textOf(vmExport.p4Test.AurabotPage())
+  assert.doesNotMatch(offlinePageText, /在线（多平台）/, '纯非 QQ 平台未连接时不得误报在线')
+  assert.match(offlinePageText, /平台未连接/)
+
+  hook = 0
+  state = [null, false, '7']
+  const offlineOvText = textOf(vmExport.p4Test.Overview({ st: offlineSt, toast() {}, go() {} }))
+  assert.match(offlineOvText, /还没有已连接的通讯平台/)
+
+  const onlineSt = {
+    ...offlineSt,
+    platforms: [{ instance: 'feishu', platform: 'feishu', name: 'feishu', enabled: true, legacy: false, state: 'connected' }],
+  }
+  hook = 0
+  state = [onlineSt, '', JSON.parse(JSON.stringify(nonQqCfg)), 'overview', null, false]
   const pageTree = vmExport.p4Test.AurabotPage()
   const pageText = textOf(pageTree)
-  assert.doesNotMatch(pageText, /QQ 没连上/, '纯非 QQ 启用多平台时状态栏不得误报「QQ 没连上」')
+  assert.doesNotMatch(pageText, /QQ 没连上/, '纯非 QQ 启用且已连接时状态栏不得误报「QQ 没连上」')
   assert.match(pageText, /在线（多平台）/)
   const subNode = collectNodes(pageTree, (n) => n.props?.className === 'ab-sub')[0]
   assert.ok(subNode)
   assert.doesNotMatch(textOf(subNode), /^QQ\s/, '无 botQQ 时副标题不应显示空 QQ 前缀')
+
+  hook = 0
+  state = [null, false, '7']
+  const onlineOvText = textOf(vmExport.p4Test.Overview({ st: onlineSt, toast() {}, go() {} }))
+  assert.doesNotMatch(onlineOvText, /还没连上 QQ 网关|还没有已连接的通讯平台/)
 
   // 3) 非 QQ 向导分支不得强校验 ownerQQ（仅 qqOk 属于 QQ 模式）
   const wizQqOkLine = source.split(/\r?\n/).find((l) => l.includes('const qqOk ='))

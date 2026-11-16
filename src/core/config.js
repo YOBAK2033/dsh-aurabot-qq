@@ -1156,7 +1156,7 @@ export function ownerAuthorizationRevision(cfg) {
     && AUTH_UUID_RE.test(binding.revision) ? binding.revision : ''
 }
 
-export function saveConfig(cfg, previous = loadConfig()) {
+export function saveConfig(cfg, previous = loadConfig(), opts = {}) {
   const c = normalize(cfg)
   const prev = isObj(previous) ? previous : {}
   const key = authOwnerKey(c)
@@ -1168,9 +1168,10 @@ export function saveConfig(cfg, previous = loadConfig()) {
     const prevQQ = qq(prev.ownerQQ)
     const prevKey = authOwnerKey(prev)
     const prevRevision = ownerAuthorizationRevision(prev)
-    // 场景 A（同主人平滑升级）：首次将旧 ownerQQ 绑定同步为 ownerPersonId 时保留原有 revision
+    // 场景 A（同主人平滑升级）：仅当宿主已核验 identity 中旧 ownerQQ 确实归属新 ownerPersonId 后，才允许继承原 revision
     const smoothUpgrade = Boolean(
-      !prevPersonId
+      opts?.verifiedOwnerUpgrade === true
+      && !prevPersonId
       && c.ownerPersonId
       && c.ownerQQ
       && c.ownerQQ === prevQQ

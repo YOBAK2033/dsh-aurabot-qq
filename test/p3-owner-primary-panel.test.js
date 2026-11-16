@@ -148,16 +148,25 @@ test('P3-2: GET /platforms/people 展开多实例选项、标注 proactive=none 
     },
   })
 
-  // 先让 b_acc 在 bridge、再在 bridge#2 上入站建立两个在线实例归属，以便断线回退测试
-  adapters.get('bridge').pushInbound({
-    chat: { kind: 'private', id: 'b_acc' },
-    sender: { account: 'b_acc', name: '主人1' },
-    parts: [{ type: 'text', text: '在线1' }],
-  })
+  // 先让 b_acc 在 bridge#2 上入站，验证多实例下未观测实例 bridge 在 ownerAccountOptions 中被禁用（selectable=false）
   adapters.get('bridge#2').pushInbound({
     chat: { kind: 'private', id: 'b_acc' },
     sender: { account: 'b_acc', name: '主人2' },
     parts: [{ type: 'text', text: '在线2' }],
+  })
+  const pBeforeObs = (await fake.call('/platforms/people')).json()
+  const preB1 = (pBeforeObs.ownerAccountOptions || []).find((o) => o.platform === 'bridge' && o.instance === 'bridge' && o.account === 'b_acc')
+  const preB2 = (pBeforeObs.ownerAccountOptions || []).find((o) => o.platform === 'bridge' && o.instance === 'bridge#2' && o.account === 'b_acc')
+  assert.equal(preB1?.observed, false)
+  assert.equal(preB1?.selectable, false, '多实例未在该实例观测到的账号必须标为不可选')
+  assert.equal(preB2?.observed, true)
+  assert.equal(preB2?.selectable, true)
+
+  // 再让 b_acc 在 bridge 上也入站，建立双实例观测归属，以便断线回退测试
+  adapters.get('bridge').pushInbound({
+    chat: { kind: 'private', id: 'b_acc' },
+    sender: { account: 'b_acc', name: '主人1' },
+    parts: [{ type: 'text', text: '在线1' }],
   })
 
   // 断掉 bridge#2，验证只读轮询 /platforms/people 不污染 lastBlockedRoute，且不产生 router.json 写副作用
@@ -221,10 +230,25 @@ test('P3-3: /platforms/people/fixed 仅非主人；/platforms/owner/primary 与 
   assert.equal(guestFixRes.ok, true)
   assert.equal(hostA.applied.gateway.routing.fixedPlatform(guestPerson), 'bridge')
 
-  // 2) /platforms/owner/primary 拒绝 caps.proactive=none 实例
+  // 2) /platforms/owner/primary 拒绝 caps.proactive=none 实例、不存在平台/实例、他人账号、以及未观测多实例账号
   const rejectNone = (await hostA.fake.call('/platforms/owner/primary', { mode: 'fixed', platform: 'feishu', instance: 'feishu', account: 'ou_nop' })).json()
   assert.equal(rejectNone.ok, false)
   assert.match(rejectNone.message, /仅支持回复/)
+
+  const rejectNoneNoInst = (await hostA.fake.call('/platforms/owner/primary', { mode: 'fixed', platform: 'feishu', account: 'ou_nop' })).json()
+  assert.equal(rejectNoneNoInst.ok, false)
+  assert.match(rejectNoneNoInst.message, /仅支持回复/)
+
+  const rejectMissingInst = (await hostA.fake.call('/platforms/owner/primary', { mode: 'fixed', platform: 'bridge', instance: 'bridge#99', account: 'b_acc' })).json()
+  assert.equal(rejectMissingInst.ok, false)
+
+  const rejectForeignAcc = (await hostA.fake.call('/platforms/owner/primary', { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'stranger_999' })).json()
+  assert.equal(rejectForeignAcc.ok, false)
+  assert.match(rejectForeignAcc.message, /未绑定在当前主人名下/)
+
+  const rejectUnobserved = (await hostA.fake.call('/platforms/owner/primary', { mode: 'fixed', platform: 'bridge', instance: 'bridge', account: 'b_acc' })).json()
+  assert.equal(rejectUnobserved.ok, false)
+  assert.match(rejectUnobserved.message, /尚未在实例「bridge」观测到/)
 
   // 3) 通过 POST /platforms/owner/primary 设置并对比另一套干净实例上的 POST /save
   const primaryPatch = { mode: 'fixed', platform: 'bridge', instance: 'bridge#2', account: 'b_acc', fallback: false, noticeFallback: true }
@@ -446,9 +470,60 @@ test('P3-5: 前端 client.js 注册 TAB_KEYS.access、GlobalAccess 主账号与�
     const selects = collectNodes(tree, (n) => n.type === 'select')
     assert.equal(selects.length, 1)
     const opts = collectNodes(selects[0], (n) => n.type === 'option')
-    assert.ok(opts.some((o) => o.props.value === '__default__' && textOf(o).includes('默认优先 QQ')))
+    assert.ok(opts.some((o) => o.props.value === '__default__' && textOf(o).includes('有 QQ 时优先 QQ，否则跟随最近平台')))
     assert.ok(opts.some((o) => o.props.value === '__recent__' && textOf(o).includes('recent')))
     assert.ok(opts.some((o) => o.props.value === 'account:feishu:feishu:ou_nop' && o.props.disabled === true && textOf(o).includes('仅支持回复')))
+
+    // 多实例未观测选项（observed:false, selectable:false）在下拉与快捷按钮均禁用
+    hook = 0
+    state = [
+      {
+        ok: true,
+        ownerAccountOptions: [
+          { key: 'bridge:bridge:b_acc', platform: 'bridge', instance: 'bridge', account: 'b_acc', state: 'connected', enabled: true, canProactive: true, multiInstance: true, observed: false, selectable: false },
+          { key: 'bridge:bridge#2:b_acc', platform: 'bridge', instance: 'bridge#2', account: 'b_acc', state: 'connected', enabled: true, canProactive: true, multiInstance: true, observed: true, selectable: true },
+        ],
+        resolvedProactiveRoute: { chatId: 'bridge#2:private:b_acc', blocked: false, reason: 'ok', target: { platform: 'bridge', instance: 'bridge#2', account: 'b_acc' }, fallbackUsed: false },
+        resolvedNoticeRoute: { chatId: 'bridge#2:private:b_acc', blocked: false, reason: 'ok', target: { platform: 'bridge', instance: 'bridge#2', account: 'b_acc' }, fallbackUsed: false },
+        lastBlockedRoute: null,
+      },
+      false,
+      null,
+    ]
+    const treeMulti = vmExport.panelTest.GlobalAccess({
+      st: { config: cfg, modules: [], onebot: { state: 'connected' } },
+      draft: JSON.parse(JSON.stringify(cfg)),
+      setDraft() {},
+      toast() {},
+    })
+    const optsMulti = collectNodes(treeMulti, (n) => n.type === 'option')
+    assert.ok(optsMulti.some((o) => o.props.value === 'account:bridge:bridge:b_acc' && o.props.disabled === true && textOf(o).includes('未观测到')))
+    assert.ok(optsMulti.some((o) => o.props.value === 'account:bridge:bridge#2:b_acc' && o.props.disabled !== true))
+
+    // 恢复 GlobalAccess 原始 tree 状态供下方按钮/开关测试使用
+    hook = 0
+    state = [
+      {
+        ok: true,
+        ownerAccountOptions: [
+          { key: 'qq:qq:10001', platform: 'qq', instance: 'qq', account: '10001', state: 'connected', enabled: true, canProactive: true, legacy: true, multiInstance: false },
+          { key: 'bridge:bridge#2:b_acc', platform: 'bridge', instance: 'bridge#2', account: 'b_acc', state: 'disconnected', enabled: true, canProactive: true, multiInstance: true },
+          { key: 'feishu:feishu:ou_nop', platform: 'feishu', instance: 'feishu', account: 'ou_nop', state: 'connected', enabled: true, canProactive: false, proactive: 'none', multiInstance: false },
+        ],
+        resolvedProactiveRoute: { chatId: '', blocked: true, reason: 'primary-offline', target: { platform: 'bridge', instance: 'bridge#2', account: 'b_acc' }, fallbackUsed: false },
+        resolvedNoticeRoute: { chatId: 'private:10001', blocked: false, reason: 'fallback-used', target: { platform: 'qq', instance: 'qq', account: '10001' }, fallbackUsed: true },
+        lastBlockedRoute: null,
+      },
+      false,
+      null,
+    ]
+    draftState = JSON.parse(JSON.stringify(cfg))
+    vmExport.panelTest.GlobalAccess({
+      st: { config: cfg, modules: [], onebot: { state: 'connected' } },
+      draft: draftState,
+      setDraft: (d) => { draftState = d },
+      toast() {},
+    })
 
     // 切换成 recent 会触发 setDraft 清空旧字段语义交由服务端前先把 mode 置 recent、platform/instance/account 清空
     selects[0].props.onChange({ target: { value: '__recent__' } })
@@ -483,8 +558,9 @@ test('P3-5: 前端 client.js 注册 TAB_KEYS.access、GlobalAccess 主账号与�
         owner: 'p-owner',
         ownerPrimary: { mode: 'fixed', platform: 'qq', instance: 'qq', account: '10001' },
         ownerAccountOptions: [
-          { key: 'qq:qq:10001', platform: 'qq', instance: 'qq', account: '10001', state: 'connected', enabled: true, canProactive: true, multiInstance: false },
-          { key: 'bridge:bridge#2:b_acc', platform: 'bridge', instance: 'bridge#2', account: 'b_acc', state: 'connected', enabled: true, canProactive: true, multiInstance: true },
+          { key: 'qq:qq:10001', platform: 'qq', instance: 'qq', account: '10001', state: 'connected', enabled: true, canProactive: true, multiInstance: false, observed: true, selectable: true },
+          { key: 'bridge:bridge:b_acc', platform: 'bridge', instance: 'bridge', account: 'b_acc', state: 'connected', enabled: true, canProactive: true, multiInstance: true, observed: false, selectable: false },
+          { key: 'bridge:bridge#2:b_acc', platform: 'bridge', instance: 'bridge#2', account: 'b_acc', state: 'connected', enabled: true, canProactive: true, multiInstance: true, observed: true, selectable: true },
         ],
         list: [
           { person: 'p-owner', name: '主人', owner: true, fixed: '', accounts: [{ platform: 'qq', account: '10001' }, { platform: 'bridge', account: 'b_acc' }] },
@@ -511,6 +587,10 @@ test('P3-5: 前端 client.js 注册 TAB_KEYS.access、GlobalAccess 主账号与�
     const platText = textOf(platTree)
     assert.match(platText, /当前主账号：QQ · 10001/)
     assert.match(platText, /设为 bridge#2 主账号/)
+
+    const unobsQuickBtn = collectNodes(platTree, (n) => n.type?.name === 'Btn' && textOf(n.children).includes('bridge 未观测'))[0]
+    assert.ok(unobsQuickBtn)
+    assert.equal(unobsQuickBtn.props.disabled, true, '多实例未观测快捷按钮必须禁用')
 
     // 快捷按钮应走 /platforms/owner/primary
     const quickPrimaryBtn = collectNodes(platTree, (n) => n.type?.name === 'Btn' && textOf(n.children).includes('设为 bridge#2 主账号'))[0]

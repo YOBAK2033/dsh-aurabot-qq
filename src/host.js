@@ -181,8 +181,15 @@ export function apply(ctx) {
     catch (error) { log.warn('迁移配置主人 QQ 到身份主线失败：', error?.message || error) }
   }
   const startupOwner = identity.owner() || ''
-  if (startupOwner !== cfg.ownerPersonId) {
-    try { cfg = saveConfig({ ...cfg, ownerPersonId: startupOwner }, cfg) }
+  const legacyQqOwner = cfg.ownerQQ && startupOwner ? identity.lookup('qq', cfg.ownerQQ) : ''
+  if (startupOwner && !cfg.ownerPersonId && cfg.ownerQQ && legacyQqOwner !== startupOwner) {
+    log.warn('配置里的旧 ownerQQ 与当前身份库主人不一致，已清空旧 ownerQQ 并重置授权代次')
+    const actualQq = identity.accountOn(startupOwner, 'qq') || ''
+    try { cfg = saveConfig({ ...cfg, ownerQQ: actualQq, ownerPersonId: startupOwner }, { ...cfg, ownerAuthorization: undefined }) }
+    catch { log.warn('重置不一致主人配置失败，本次启动沿用会话授权') }
+  } else if (startupOwner !== cfg.ownerPersonId) {
+    const verified = Boolean(startupOwner && !cfg.ownerPersonId && legacyQqOwner === startupOwner)
+    try { cfg = saveConfig({ ...cfg, ownerPersonId: startupOwner }, cfg, { verifiedOwnerUpgrade: verified }) }
     catch { log.warn('同步主人身份编号失败，本次启动沿用旧配置') }
   }
   if (authOwnerKey(cfg) && !ownerAuthorizationRevision(cfg)) {
@@ -1590,6 +1597,34 @@ export function apply(ctx) {
     return value
   }
 
+  const platformInstancesSummary = () => {
+    if (platformGateway) return knownPlatformInstances()
+    const list = []
+    if (legacyQqActive()) {
+      list.push({
+        instance: defaultPlatform || 'qq',
+        platform: defaultPlatform || 'qq',
+        name: defaultPlatform || 'qq',
+        enabled: true,
+        legacy: true,
+        state: onebotState,
+      })
+    }
+    for (const [instance, p] of Object.entries(cfg.platforms || {})) {
+      if (!p || typeof p !== 'object') continue
+      if (instance === defaultPlatform && legacyQqActive()) continue
+      list.push({
+        instance,
+        platform: String(p.platform || instance).split('#')[0] || instance,
+        name: String(p.name || instance),
+        enabled: p.enabled !== false,
+        legacy: false,
+        state: 'stopped',
+      })
+    }
+    return list
+  }
+
   async function overview() {
     const inst = snowluma.detect()
     const running = inst.installed ? await snowluma.running() : false
@@ -1610,6 +1645,7 @@ export function apply(ctx) {
       startedAt: STARTED_AT,
       apiVersion: API_VERSION,
       config: publicConfig(cfg),
+      platforms: platformInstancesSummary(),
       onebot: { state: onebotState, login, endpoint: { httpUrl: endpoint().httpUrl, wsUrl: endpoint().wsUrl }, problem: onebotState === 'connected' && loginOk ? '' : await connectionProblem(), warmup: gatewayWarmSince ? { since: gatewayWarmSince, seconds: Math.max(0, Math.round((Date.now() - gatewayWarmSince) / 1000)), phase: warmupPhase.phase || '', label: warmupPhase.label || '' } : null },
       outbox: outbox.status(),
       snowluma: { ...inst, compat: snowluma.compat(), running, consented: await consented(running), owns: snowluma.ownsProcess, lastAttach: snowluma.lastAttach, downloadPage: DOWNLOAD_PAGE, webui: snowluma.webuiUrl() },
@@ -3047,6 +3083,7 @@ export function apply(ctx) {
     for (const acc of identity.accountsOf(owner) || []) {
       if (!acc?.platform || !acc?.account) continue
       const matched = instances.filter((x) => x.platform === acc.platform)
+      const knownInstances = platformGateway?.routing?.instancesForAccount?.(acc.platform, acc.account) || []
       if (!matched.length) {
         options.push({
           key: `${acc.platform}:${acc.platform}:${acc.account}`,
@@ -3059,12 +3096,20 @@ export function apply(ctx) {
           proactive: null,
           legacy: false,
           multiInstance: false,
+          observed: knownInstances.includes(acc.platform),
+          knownInstances: [...knownInstances],
+          unlinkedOnInstance: false,
+          selectable: true,
         })
         continue
       }
       const multiInstance = matched.length > 1
       for (const inst of matched) {
         const canProactive = inst.legacy ? true : (!inst.caps || inst.caps.proactive !== 'none')
+        const observed = inst.legacy ? true : knownInstances.includes(inst.instance)
+        const isSelf = Boolean(inst.self?.account && String(inst.self.account) === String(acc.account))
+        const unlinkedOnInstance = !inst.legacy && (isSelf || (knownInstances.length > 0 ? !observed : multiInstance))
+        const selectable = canProactive && !unlinkedOnInstance
         options.push({
           key: `${acc.platform}:${inst.instance}:${acc.account}`,
           platform: acc.platform,
@@ -3076,6 +3121,10 @@ export function apply(ctx) {
           proactive: inst.legacy ? 'free' : (inst.caps?.proactive ?? null),
           legacy: Boolean(inst.legacy),
           multiInstance,
+          observed,
+          knownInstances: inst.legacy ? [inst.instance] : [...knownInstances],
+          unlinkedOnInstance,
+          selectable,
         })
       }
     }
@@ -3194,10 +3243,58 @@ export function apply(ctx) {
     }
     const merged = mergeFromPanel(getConfig(), { ownerPrimary: patch })
     const nextPref = merged.ownerPrimary
-    if (nextPref.mode === 'fixed' && nextPref.instance) {
-      const inst = knownPlatformInstances().find((x) => x.instance === nextPref.instance)
-      if (inst && !inst.legacy && inst.caps?.proactive === 'none') {
+    const touchesPrimaryTarget = b.mode !== undefined || b.platform !== undefined || b.instance !== undefined || b.account !== undefined
+    if (touchesPrimaryTarget && nextPref.mode === 'fixed' && (nextPref.platform || nextPref.instance || nextPref.account)) {
+      const owner = identity.owner()
+      if (!owner) return { ok: false, message: '尚未认领主人身份，无法设置主账号' }
+      const allInsts = knownPlatformInstances()
+      let matchedInst = null
+      if (nextPref.instance) {
+        matchedInst = allInsts.find((x) => x.instance === nextPref.instance) || null
+        if (!matchedInst) return { ok: false, message: `找不到平台实例「${nextPref.instance}」` }
+        if (nextPref.platform && matchedInst.platform !== nextPref.platform) {
+          return { ok: false, message: `实例「${nextPref.instance}」不属于平台「${nextPref.platform}」` }
+        }
+      } else if (nextPref.platform) {
+        const samePlat = allInsts.filter((x) => x.platform === nextPref.platform)
+        if (!samePlat.length) return { ok: false, message: `尚未配置平台「${nextPref.platform}」` }
+        matchedInst = samePlat.find((x) => x.enabled && x.state === 'connected' && (x.legacy || !x.caps || x.caps.proactive !== 'none'))
+          || samePlat.find((x) => x.enabled && x.state === 'connected')
+          || samePlat.find((x) => x.legacy || !x.caps || x.caps.proactive !== 'none')
+          || samePlat[0]
+      } else {
+        return { ok: false, message: '指定账号时必须同时指定平台或实例' }
+      }
+      if (matchedInst && !matchedInst.legacy && matchedInst.caps?.proactive === 'none') {
         return { ok: false, message: '该平台实例仅支持回复，无法设为接收主动消息的主账号' }
+      }
+      const targetPlatform = matchedInst?.platform || nextPref.platform
+      const platAccounts = (identity.accountsOf(owner) || []).filter((a) => a && a.platform === targetPlatform && a.account)
+      if (!platAccounts.length) {
+        return { ok: false, message: `当前主人在「${platformLabel(targetPlatform)}」下没有已绑定账号` }
+      }
+      const samePlatNonLegacy = allInsts.filter((x) => !x.legacy && x.platform === targetPlatform)
+      if (nextPref.account) {
+        const hitAcc = platAccounts.find((a) => String(a.account) === String(nextPref.account))
+        if (!hitAcc) return { ok: false, message: '该账号未绑定在当前主人名下，无法设为主账号' }
+        if (matchedInst?.self?.account && String(matchedInst.self.account) === String(nextPref.account)) {
+          return { ok: false, message: '不能把机器人自身账号设为主账号' }
+        }
+        if (matchedInst && !matchedInst.legacy) {
+          const knownInsts = platformGateway?.routing?.instancesForAccount?.(targetPlatform, nextPref.account) || []
+          if ((knownInsts.length > 0 || samePlatNonLegacy.length > 1) && !knownInsts.includes(matchedInst.instance)) {
+            return { ok: false, message: `尚未在实例「${matchedInst.instance}」观测到该账号，请先从该实例发一条私聊` }
+          }
+        }
+      } else if (matchedInst && !matchedInst.legacy && samePlatNonLegacy.length > 1) {
+        const hasObservedAcc = platAccounts.some((a) => {
+          if (matchedInst.self?.account && String(matchedInst.self.account) === String(a.account)) return false
+          const knownInsts = platformGateway?.routing?.instancesForAccount?.(targetPlatform, a.account) || []
+          return knownInsts.includes(matchedInst.instance)
+        })
+        if (!hasObservedAcc) {
+          return { ok: false, message: `尚未在实例「${matchedInst.instance}」观测到主人账号，请先从该实例发一条私聊` }
+        }
       }
     }
     setConfig(merged)
